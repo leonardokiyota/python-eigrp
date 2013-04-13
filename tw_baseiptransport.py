@@ -10,10 +10,8 @@
 
 import struct
 import socket
-from twisted.internet import reactor
-from twisted.internet import protocol, fdesc, base, udp, pollreactor, main
+from twisted.internet import fdesc, base, udp, main, reactor
 from twisted.python import log
-from zope.interface import Interface
 
 from twisted.python.runtime import platformType
 if platformType == 'win32':
@@ -26,14 +24,11 @@ if platformType == 'win32':
 else:
     from errno import EWOULDBLOCK, EINTR, EMSGSIZE, ECONNREFUSED, EAGAIN
 
-# XXX non-POSIX systems would use twisted.internet.selectreactor here. See:
-# /usr/lib/python2.7/dist-packages/twisted/internet/default.py
 def listenIP(self, port, protocol, interface='', maxPacketSize=8192):
     p = IPTransport(port, protocol, interface, maxPacketSize, self)
     p.startListening()
     return p
 reactor.listenIP = listenIP
-#pollreactor.PollReactor.listenIP = listenIP
 
 # Open for suggestions on a name other than IPTransport. The other examples
 # I had were UDPPort and TCPPort -- clearly IPPort isn't a better option.
