@@ -26,12 +26,12 @@ import logging.config
 import functools
 import struct
 import binascii
-from twisted.internet import reactor
 from twisted.internet import protocol
 from twisted.python import log
 import ipaddr
 
 import tw_baseiptransport
+from tw_baseiptransport import reactor
 import sysiface
 import util
 
@@ -199,7 +199,7 @@ class EIGRP(protocol.DatagramProtocol):
         self.log.debug("Processing SIAREPLY")
 
     def run(self):
-        reactor.listenIP(reactor, 88, self)
+        reactor.listenIP(88, self)
         self.log.info("EIGRP is starting up...")
         reactor.run()
 

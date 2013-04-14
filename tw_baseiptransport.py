@@ -31,8 +31,10 @@
 
 import struct
 import socket
+import sys
 from twisted.internet import fdesc, base, udp, main, reactor
 from twisted.python import log
+from twisted.internet.main import installReactor
 
 from twisted.python.runtime import platformType
 if platformType == 'win32':
@@ -45,11 +47,23 @@ if platformType == 'win32':
 else:
     from errno import EWOULDBLOCK, EINTR, EMSGSIZE, ECONNREFUSED, EAGAIN
 
-def listenIP(self, port, protocol, interface='', maxPacketSize=8192):
-    p = IPTransport(port, protocol, interface, maxPacketSize, self)
-    p.startListening()
-    return p
-reactor.listenIP = listenIP
+# I wanted to extend reactor to support IPTransport while being as non-invasive
+# as possible to the original reactor and using no assumptions about
+# what reactor type is installed. So the reactor was imported above, now we
+# get its class so it can be extended. Deleting it from sys.modules is
+# necessary because the reactor code checks if another reactor is already
+# installed and will bomb if so. Twisted uses the same 'del' used below to
+# deal with importing 'reactor' twice (see reactor.py). So, doing it this way
+# seems to be safe.
+reactor_class = type(reactor)
+del sys.modules['twisted.internet.reactor']
+class ReactorWithIPTransport(reactor_class):
+    def listenIP(self, port, protocol, interface='', maxPacketSize=8192):
+        p = IPTransport(port, protocol, interface, maxPacketSize, self)
+        p.startListening()
+        return p
+reactor = ReactorWithIPTransport()
+installReactor(reactor)
 
 # Open for suggestions on a name other than IPTransport. The other examples
 # I had were UDPPort and TCPPort -- clearly IPPort isn't a better option.
