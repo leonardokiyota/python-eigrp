@@ -110,6 +110,9 @@ class IPTransport(udp.Port):
                         log.msg("Received invalid packet with data length less than 1 from host %s." % addr[0])
                         continue
                     iphdrlen = (ord(data[0]) & 0x0f) << 2
+                    if iphdrlen < 20:
+                        log.msg("Received malformed packet. IP header len too small: %d bytes" % iphdrlen)
+                        continue
                     if len(data) <= iphdrlen:
                         log.msg("Received malformed or empty packet from host %s." % addr[0])
                         continue

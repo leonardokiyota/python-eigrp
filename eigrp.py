@@ -1,5 +1,24 @@
 #!/usr/bin/env python
 
+"""A Python implementation of EIGRP."""
+
+# Python-EIGRP (http://python-eigrp.googlecode.com)
+# Copyright (C) 2013 Patrick F. Allen
+# 
+# This program is free software; you can redistribute it and/or
+# modify it under the terms of the GNU General Public License
+# as published by the Free Software Foundation; either version 2
+# of the License, or (at your option) any later version.
+# 
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+# 
+# You should have received a copy of the GNU General Public License
+# along with this program; if not, write to the Free Software
+# Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
+
 import sys
 import optparse
 import logging
@@ -21,8 +40,9 @@ class EIGRP(protocol.DatagramProtocol):
     DEFAULT_K_VALUES = [ 1, 74, 1, 0, 0, 0 ]
     DEFAULT_HT_MULTIPLIER = 3
 
-    def __init__(self, rid, asn, routes, import_routes, interfaces, log_config,
-                 admin_port, kvalues=None, hdrver=2, hello_interval=5):
+    def __init__(self, rid, asn, routes, import_routes, requested_ifaces,
+                 log_config, admin_port, kvalues=None, hello_interval=5,
+                 hdrver=2):
         """An EIGRP implementation based on Cisco's draft informational RFC
         located here:
 
@@ -32,14 +52,14 @@ class EIGRP(protocol.DatagramProtocol):
         asn -- The autonomous system number
         routes -- Iterable of routes to import
         import_routes -- Import routes from the kernel (True or False)
-        interfaces -- Iterable of IP addresses to send from
+        requested_ifaces -- Iterable of IP addresses to send from
         log_config -- Configuration filename
         admin_port -- The TCP port to bind to the administrative interface
                       (not implemented)
         kvalues -- Iterable of K-value weights. Indexes are mapped to K1
                     through K6 (index 0 -> K1). If None, use defaults.
-        hdrver -- Version of the RTP header to use. Only 2 is supported.
         hello_interval -- The hello interval. Also influences holdtime.
+        hdrver -- Version of the RTP header to use. Only 2 is supported.
         """
         asn_rid_err_msg = "%s must be a positive number less than 65536."
         if not isinstance(rid, int):
@@ -65,7 +85,8 @@ class EIGRP(protocol.DatagramProtocol):
         self._hello_interval = hello_interval
         self._holdtime = self._hello_interval * self._ht_multiplier
 
-        if not len(kvalues) == 6:
+        if not kvalues or \
+           len(kvalues) != 6:
             raise(ValueError("Exactly 6 K-values must be present."))
         try:
             for k in kvalues:
@@ -90,8 +111,20 @@ class EIGRP(protocol.DatagramProtocol):
         else:
             raise(NotSupported("No support for current OS."))
         self._register_op_handlers()
+        self._build_hello_pkt()
+        for iface in requested_ifaces:
+            self.activate_iface(iface)
         reactor.callWhenRunning(self._send_periodic_hello)
         #eigrpadmin.run(self, port=admin_port)
+
+    def activate_iface(self, req_iface):
+        """Enable EIGRP to send from the specified interface."""
+        for sys_iface in self._sys.logical_ifaces:
+            if req_iface == sys_iface.ip.ip.exploded:
+                sys_iface.activated = True
+                return
+        raise(ValueError("Requested IP %s is unusable. (Is it assigned to this"
+                         " machine on a usable interface?)" % iface))
 
     def _init_logging(self, log_config):
         # debug1 is less verbose, debug5 is more verbose.
@@ -108,8 +141,28 @@ class EIGRP(protocol.DatagramProtocol):
         suppress_reactor_not_running = functools.partial(util.suppress_reactor_not_running, logfunc=self.log.debug)
         log.addObserver(suppress_reactor_not_running)
 
+    def _build_hello_pkt(self):
+        """Called to create the hello packet that should be sent at every
+        hello interval. This should be called at startup and whenever the
+        k-values or holdtime changes."""
+        self._hello_pkt = self._rtphdr(opcode=self._rtphdr.OPC_HELLO, flags=0,
+                                       seq=0, ack=0, rid=self._rid,
+                                       asn=self._asn).pack()
+        self._hello_pkt += EIGRPFieldParam(k1=self._kvalues[0],
+                                           k2=self._kvalues[1],
+                                           k3=self._kvalues[2],
+                                           k4=self._kvalues[3],
+                                           k5=self._kvalues[4],
+                                           k6=self._kvalues[5],
+                                           holdtime=self._holdtime).pack()
+
     def _send_periodic_hello(self):
-        reactor.callLater(self._hello_timer, self._send_periodic_hello)
+        self.log.debug2("Sending periodic hello.")
+        for iface in self._sys.logical_ifaces:
+            if iface.activated:
+                # XXX send hello
+                pass
+        reactor.callLater(self._hello_interval, self._send_periodic_hello)
 
     def _register_op_handlers(self):
         self._op_handlers = dict()
@@ -186,7 +239,7 @@ class EIGRP(protocol.DatagramProtocol):
             return
 
         # XXX RTP, ND/NR processing here
-        
+ 
         payload = data[self._rtphdr.HEADERLEN:]
         try:
             handler = self._op_handlers[hdr.opcode]
@@ -203,6 +256,11 @@ class EIGRPException(Exception):
 
 
 class NotSupported(EIGRPException):
+    def __init__(self, *args, **kwargs):
+        super(EIGRPException, self).__thisclass__.__init__(self, *args, **kwargs)
+
+
+class FormatException(EIGRPException):
     def __init__(self, *args, **kwargs):
         super(EIGRPException, self).__thisclass__.__init__(self, *args, **kwargs)
 
@@ -230,7 +288,7 @@ class EIGRPFieldFactory(object):
             elif _type == EIGRPFieldPeerTerm.TYPE:
                 return EIGRPFieldPeerTerm(raw=raw[EIGRPField.BASE_FORMATLEN:])
             else:
-                raise(ValueError("Unknown value in TLV: %d" % _type))
+                raise(ValueError("Unknown type in TLV: %d" % _type))
         except struct.error:
             raise(FormatException("Unpacking failed (malformed TLV?)."))
 
@@ -246,7 +304,7 @@ class EIGRPField(object):
 
     def __init__(self, proto=None):
         if proto == None:
-            self._proto = self.PROTO_IP4
+            proto = self.PROTO_IP4
         if proto != self.PROTO_IP4:
             raise(ValueError("Only PROTO_IP4 is supported."))
         self._proto = proto
@@ -288,7 +346,7 @@ class EIGRPFieldParam(EIGRPField):
             self._k5 = k5
             self._k6 = k6
             self._holdtime = holdtime
-            self._type = self.TYPE_PARAM
+            self._type = self.TYPE
             self._len = self.FORMATLEN
         else:
             raise(ValueError("Either raw or all other values are required, not"
@@ -361,10 +419,9 @@ class RTPHeader2(object):
     FLAG_INIT = 1
     FLAG_CR   = 2
 
-    def __init__(self, raw=None, hdrver=None, opcode=None, flags=None,
-                 seq=None, ack=None, rid=None, asn=None):
+    def __init__(self, raw=None, opcode=None, flags=None, seq=None, ack=None,
+                 rid=None, asn=None):
         if raw and \
-           hdrver == None and \
            opcode == None and \
            flags  == None and \
            seq    == None and \
@@ -373,14 +430,12 @@ class RTPHeader2(object):
            asn    == None:
             self.unpack(raw)
         elif not raw and \
-             hdrver != None and \
              opcode != None and \
              flags  != None and \
              seq    != None and \
              ack    != None and \
              rid    != None and \
              asn    != None:
-            self.hdrver = hdrver
             self.opcode = opcode
             self.flags = flags
             self.seq = seq
@@ -393,11 +448,11 @@ class RTPHeader2(object):
                              " are required."))
 
     def unpack(self, raw):
-        self.hdrver, self.opcode, self.chksum, self.flags, self.seq, \
+        self.VER, self.opcode, self.chksum, self.flags, self.seq, \
              self.ack, self.rid, self.asn = struct.unpack(self.FORMAT, raw)
 
     def pack(self):
-        return struct.pack(self.FORMAT, self.hdrver, self.opcode, self.chksum,
+        return struct.pack(self.FORMAT, self.VER, self.opcode, self.chksum,
                            self.flags, self.seq, self.ack, self.rid,
                            self.asn)
 
@@ -420,13 +475,26 @@ def parse_args(argv):
     op.add_option("-l", "--log-config", default="logging.conf",
                   help="The logging configuration file "
                         "(default logging.conf).")
-#    op.add_option("-t", "--base-timer", type="int",
-#                  help="Use non-default update/gc/timeout timers. The update "
-#                  "timer is set to this value and gc/timeout timers are based "
-#                  "on it")
+    op.add_option("-k", "--kvalues", type="str", default="1,74,1,0,0,0",
+                  help="Use non-default K-values (metric coefficients).")
+    op.add_option("-t", "--hello-interval", type="int", default=5,
+                  help="Use non-default hello timer. Hold time is 3 times the"
+                  " value given here. 5 sec by default.")
     options, arguments = op.parse_args(argv)
+
     if not options.interface:
         op.error("At least one interface IP is required (-i).")
+
+    # Turn kvalues into a list
+    options.kvalues = options.kvalues.split(",")
+    if len(options.kvalues) != 6:
+        op.error("K-Values must be a comma separated list (e.g. "
+                 "1,74,1,0,0,0).")
+    try:
+        for index, k in enumerate(options.kvalues[:]):
+            options.kvalues[index] = int(k)
+    except ValueError:
+        op.error("Kvalues must be integers.")
     if len(arguments) > 1:
         op.error("Unexpected non-option argument(s): '" + \
                  " ".join(arguments[1:]) + "'")
@@ -435,7 +503,7 @@ def parse_args(argv):
 
 def main(argv):
     options, arguments = parse_args(argv)
-    eigrpserv = EIGRP(options.router_id, options.as_number, options.route, options.import_routes, options.interface, options.log_config, options.admin_port)
+    eigrpserv = EIGRP(options.router_id, options.as_number, options.route, options.import_routes, options.interface, options.log_config, options.admin_port, options.kvalues, options.hello_interval)
     eigrpserv.run()
 
 if __name__ == "__main__":
