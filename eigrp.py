@@ -40,6 +40,8 @@ class EIGRP(protocol.DatagramProtocol):
     DEFAULT_K_VALUES = [ 1, 74, 1, 0, 0, 0 ]
     DEFAULT_HT_MULTIPLIER = 3
 
+    DST_IP = "224.0.0.10"
+
     def __init__(self, rid, asn, routes, import_routes, requested_ifaces,
                  log_config, admin_port, kvalues=None, hello_interval=5,
                  hdrver=2):
@@ -145,23 +147,24 @@ class EIGRP(protocol.DatagramProtocol):
         """Called to create the hello packet that should be sent at every
         hello interval. This should be called at startup and whenever the
         k-values or holdtime changes."""
-        self._hello_pkt = self._rtphdr(opcode=self._rtphdr.OPC_HELLO, flags=0,
+        hdr = self._rtphdr(opcode=self._rtphdr.OPC_HELLO, flags=0,
                                        seq=0, ack=0, rid=self._rid,
-                                       asn=self._asn).pack()
-        self._hello_pkt += EIGRPFieldParam(k1=self._kvalues[0],
+                                       asn=self._asn)
+        fields = EIGRPFieldParam(k1=self._kvalues[0],
                                            k2=self._kvalues[1],
                                            k3=self._kvalues[2],
                                            k4=self._kvalues[3],
                                            k5=self._kvalues[4],
                                            k6=self._kvalues[5],
-                                           holdtime=self._holdtime).pack()
+                                           holdtime=self._holdtime)
+        self._hello_pkt = RTPPacket(hdr, fields).pack()
 
     def _send_periodic_hello(self):
         self.log.debug2("Sending periodic hello.")
         for iface in self._sys.logical_ifaces:
             if iface.activated:
-                # XXX send hello
-                pass
+                self.transport.setOutgoingInterface(iface.ip.ip.exploded)
+                self.transport.write(self._hello_pkt, (self.DST_IP, 0))
         reactor.callLater(self._hello_interval, self._send_periodic_hello)
 
     def _register_op_handlers(self):
@@ -214,6 +217,7 @@ class EIGRP(protocol.DatagramProtocol):
 
     def datagramReceived(self, data, addr_and_zero):
         addr = addr_and_zero[0]
+        self.log.debug5("Received datagram from %s" % addr)
         host_local = False
         addr = ipaddr.IPv4Address(addr)
         for local_iface in self._sys.logical_ifaces:
@@ -224,7 +228,7 @@ class EIGRP(protocol.DatagramProtocol):
             self.log.debug5("Ignoring message from local system.")
             return
 
-        self.log.debug("Received datagram from %s" % addr)
+        self.log.debug("Processing datagram from %s" % addr)
         try:
             hdr = self._rtphdr(data[:self._rtphdr.HEADERLEN])
         except struct.error:
@@ -296,17 +300,18 @@ class EIGRPFieldFactory(object):
 class EIGRPField(object):
     """Base class for EIGRP Fields (TLVs)."""
 
-    PROTO_IP4 = 1
-    PROTO_IP6 = 4
+    PROTO_GENERIC = 0
+    PROTO_IP4     = 1
+    PROTO_IP6     = 4
 
-    BASE_FORMAT    = "BBH"
+    BASE_FORMAT    = ">BBH"
     BASE_FORMATLEN = struct.calcsize(BASE_FORMAT)
 
     def __init__(self, proto=None):
         if proto == None:
-            proto = self.PROTO_IP4
-        if proto != self.PROTO_IP4:
-            raise(ValueError("Only PROTO_IP4 is supported."))
+            proto = self.PROTO_GENERIC
+        if proto != self.PROTO_GENERIC:
+            raise(ValueError("Only PROTO_GENERIC is supported."))
         self._proto = proto
 
 
@@ -347,7 +352,10 @@ class EIGRPFieldParam(EIGRPField):
             self._k6 = k6
             self._holdtime = holdtime
             self._type = self.TYPE
-            self._len = self.FORMATLEN
+
+            # Don't like adding the BASE len here... probably a better
+            # way to do this.
+            self._len = self.FORMATLEN + self.BASE_FORMATLEN
         else:
             raise(ValueError("Either raw or all other values are required, not"
                              " both."))
@@ -403,7 +411,7 @@ class RTPPacket(object):
 class RTPHeader2(object):
     """Reliable Transport Protocol Header (header version 2)."""
 
-    FORMAT = "BBHIIIHH"
+    FORMAT = ">BBHIIIHH"
     HEADERLEN = struct.calcsize(FORMAT)
     VER = 2
 

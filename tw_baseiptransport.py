@@ -54,7 +54,7 @@ reactor.listenIP = listenIP
 # Open for suggestions on a name other than IPTransport. The other examples
 # I had were UDPPort and TCPPort -- clearly IPPort isn't a better option.
 # Maybe IPSocket?
-class IPTransport(udp.Port):
+class IPTransport(udp.MulticastMixin, udp.Port):
     """Provides IP services for layer 4 transport protocols.
 
     Protocols that use IPTransport will receive and send data directly over
