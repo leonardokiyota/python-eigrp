@@ -17,8 +17,12 @@ import sysiface
 import util
 
 class EIGRP(protocol.DatagramProtocol):
+
+    DEFAULT_K_VALUES = [ 1, 74, 1, 0, 0, 0 ]
+    DEFAULT_HT_MULTIPLIER = 3
+
     def __init__(self, rid, asn, routes, import_routes, interfaces, log_config,
-                 admin_port, hdrver=2):
+                 admin_port, kvalues=None, hdrver=2, hello_interval=5):
         """An EIGRP implementation based on Cisco's draft informational RFC
         located here:
 
@@ -26,6 +30,16 @@ class EIGRP(protocol.DatagramProtocol):
 
         rid -- The router ID to use
         asn -- The autonomous system number
+        routes -- Iterable of routes to import
+        import_routes -- Import routes from the kernel (True or False)
+        interfaces -- Iterable of IP addresses to send from
+        log_config -- Configuration filename
+        admin_port -- The TCP port to bind to the administrative interface
+                      (not implemented)
+        kvalues -- Iterable of K-value weights. Indexes are mapped to K1
+                    through K6 (index 0 -> K1). If None, use defaults.
+        hdrver -- Version of the RTP header to use. Only 2 is supported.
+        hello_interval -- The hello interval. Also influences holdtime.
         """
         asn_rid_err_msg = "%s must be a positive number less than 65536."
         if not isinstance(rid, int):
@@ -38,6 +52,30 @@ class EIGRP(protocol.DatagramProtocol):
             raise(ValueError(asn_rid_err_msg % "AS Number"))
         self._rid = rid
         self._asn = asn
+        self._ht_multiplier = self.DEFAULT_HT_MULTIPLIER
+
+        # Holdtime must fit in a 16 bit field, so the hello interval could
+        # in theory be set to a max of 65535/HT_MULTIPLIER. Since this is
+        # measured in seconds, in reality it will be set much shorter.
+        max_hello_interval = 65535 / self._ht_multiplier
+        if not (1 <= hello_interval <= max_hello_interval):
+            raise(ValueError("hello_interval must be between 1 and %d" % \
+                             max_hello_interval))
+
+        self._hello_interval = hello_interval
+        self._holdtime = self._hello_interval * self._ht_multiplier
+
+        if not len(kvalues) == 6:
+            raise(ValueError("Exactly 6 K-values must be present."))
+        try:
+            for k in kvalues:
+                if not (0 <= k <= 255):
+                    raise(ValueError("Each kvalue must be between 0 and 255."))
+        except TypeError:
+            raise(TypeError("kvalues must be an iterable."))
+            if not sum(kvalues):
+                raise(ValueError("At least one kvalue must be non-zero."))
+        self._kvalues = kvalues
 
         if hdrver == 2:
             self._rtphdr = RTPHeader2
@@ -52,6 +90,7 @@ class EIGRP(protocol.DatagramProtocol):
         else:
             raise(NotSupported("No support for current OS."))
         self._register_op_handlers()
+        reactor.callWhenRunning(self._send_periodic_hello)
         #eigrpadmin.run(self, port=admin_port)
 
     def _init_logging(self, log_config):
@@ -69,35 +108,38 @@ class EIGRP(protocol.DatagramProtocol):
         suppress_reactor_not_running = functools.partial(util.suppress_reactor_not_running, logfunc=self.log.debug)
         log.addObserver(suppress_reactor_not_running)
 
+    def _send_periodic_hello(self):
+        reactor.callLater(self._hello_timer, self._send_periodic_hello)
+
     def _register_op_handlers(self):
         self._op_handlers = dict()
-        self._op_handlers[self._rtphdr.OPC_UPDATE] = self._eigrp_packet_handler_update
-        self._op_handlers[self._rtphdr.OPC_REQUEST] = self._eigrp_packet_handler_request
-        self._op_handlers[self._rtphdr.OPC_QUERY] = self._eigrp_packet_handler_query
-        self._op_handlers[self._rtphdr.OPC_REPLY] = self._eigrp_packet_handler_reply
-        self._op_handlers[self._rtphdr.OPC_HELLO] = self._eigrp_packet_handler_hello
-        self._op_handlers[self._rtphdr.OPC_SIAQUERY] = self._eigrp_packet_handler_siaquery
-        self._op_handlers[self._rtphdr.OPC_SIAREPLY] = self._eigrp_packet_handler_siareply
+        self._op_handlers[self._rtphdr.OPC_UPDATE] = self._eigrp_op_handler_update
+        self._op_handlers[self._rtphdr.OPC_REQUEST] = self._eigrp_op_handler_request
+        self._op_handlers[self._rtphdr.OPC_QUERY] = self._eigrp_op_handler_query
+        self._op_handlers[self._rtphdr.OPC_REPLY] = self._eigrp_op_handler_reply
+        self._op_handlers[self._rtphdr.OPC_HELLO] = self._eigrp_op_handler_hello
+        self._op_handlers[self._rtphdr.OPC_SIAQUERY] = self._eigrp_op_handler_siaquery
+        self._op_handlers[self._rtphdr.OPC_SIAREPLY] = self._eigrp_op_handler_siareply
 
-    def _eigrp_packet_handler_update(self, addr, hdr, data):
+    def _eigrp_op_handler_update(self, addr, hdr, data):
         self.log.debug("Processing UPDATE")
 
-    def _eigrp_packet_handler_request(self, addr, hdr, data):
+    def _eigrp_op_handler_request(self, addr, hdr, data):
         self.log.debug("Processing REQUEST")
 
-    def _eigrp_packet_handler_query(self, addr, hdr, data):
+    def _eigrp_op_handler_query(self, addr, hdr, data):
         self.log.debug("Processing QUERY")
 
-    def _eigrp_packet_handler_reply(self, addr, hdr, data):
+    def _eigrp_op_handler_reply(self, addr, hdr, data):
         self.log.debug("Processing REPLY")
 
-    def _eigrp_packet_handler_hello(self, addr, hdr, data):
+    def _eigrp_op_handler_hello(self, addr, hdr, data):
         self.log.debug("Processing HELLO")
 
-    def _eigrp_packet_handler_siaquery(self, addr, hdr, data):
+    def _eigrp_op_handler_siaquery(self, addr, hdr, data):
         self.log.debug("Processing SIAQUERY")
 
-    def _eigrp_packet_handler_siareply(self, addr, hdr, data):
+    def _eigrp_op_handler_siareply(self, addr, hdr, data):
         self.log.debug("Processing SIAREPLY")
 
     def run(self):
@@ -144,7 +186,7 @@ class EIGRP(protocol.DatagramProtocol):
             return
 
         # XXX RTP, ND/NR processing here
-
+        
         payload = data[self._rtphdr.HEADERLEN:]
         try:
             handler = self._op_handlers[hdr.opcode]
@@ -164,10 +206,102 @@ class NotSupported(EIGRPException):
     def __init__(self, *args, **kwargs):
         super(EIGRPException, self).__thisclass__.__init__(self, *args, **kwargs)
 
-class StubFields(object):
-    """Stub class to test checksum calculation"""
+
+class EIGRPFieldFactory(object):
+    """Factory for EIGRP TLV fields."""
+
+    def build(self, raw):
+        """Returns the TLV parsed from the raw data."""
+        try:
+            _proto, _type, _len = struct.unpack(EIGRPField.BASE_FORMAT,
+                                               raw[:EIGRPField.BASE_FORMATLEN])
+            if _type == EIGRPFieldParam.TYPE:
+                return EIGRPFieldParam(raw=raw[EIGRPField.BASE_FORMATLEN:])
+            elif _type == EIGRPFieldAuth.TYPE:
+                return EIGRPFieldAuth(raw=raw[EIGRPField.BASE_FORMATLEN:])
+            elif _type == EIGRPFieldSeq.TYPE:
+                return EIGRPFieldSeq(raw=raw[EIGRPField.BASE_FORMATLEN:])
+            elif _type == EIGRPFieldSwVersion.TYPE:
+                return EIGRPFieldSwVersion(raw=raw[EIGRPField.BASE_FORMATLEN:])
+            elif _type == EIGRPFieldMulticastSeq.TYPE:
+                return EIGRPFieldMulticastSeq(raw=raw[EIGRPField.BASE_FORMATLEN:])
+            elif _type == EIGRPFieldPeerInfo.TYPE:
+                return EIGRPFieldPeerInfo(raw=raw[EIGRPField.BASE_FORMATLEN:])
+            elif _type == EIGRPFieldPeerTerm.TYPE:
+                return EIGRPFieldPeerTerm(raw=raw[EIGRPField.BASE_FORMATLEN:])
+            else:
+                raise(ValueError("Unknown value in TLV: %d" % _type))
+        except struct.error:
+            raise(FormatException("Unpacking failed (malformed TLV?)."))
+
+
+class EIGRPField(object):
+    """Base class for EIGRP Fields (TLVs)."""
+
+    PROTO_IP4 = 1
+    PROTO_IP6 = 4
+
+    BASE_FORMAT    = "BBH"
+    BASE_FORMATLEN = struct.calcsize(BASE_FORMAT)
+
+    def __init__(self, proto=None):
+        if proto == None:
+            self._proto = self.PROTO_IP4
+        if proto != self.PROTO_IP4:
+            raise(ValueError("Only PROTO_IP4 is supported."))
+        self._proto = proto
+
+
+class EIGRPFieldParam(EIGRPField):
+    """Parameter type TLV"""
+
+    TYPE = 1
+
+    FORMAT = "BBBBBBH"
+    FORMATLEN = struct.calcsize(FORMAT)
+
+    def __init__(self, raw=None, k1=None, k2=None, k3=None, k4=None, k5=None,
+                 k6=None, holdtime=None, *args, **kwargs):
+        super(EIGRPField, self).__thisclass__.__init__(self, *args, **kwargs)
+        if raw and \
+           not (k1 != None or \
+                k2 != None or \
+                k3 != None or \
+                k4 != None or \
+                k5 != None or \
+                k6 != None or \
+                holdtime):
+            self._k1, self._k2, self._k3, self._k4, self._k5, self._k6, \
+                      self._holdtime = self.unpack(raw)
+        elif not raw and \
+             (k1 != None and \
+              k2 != None and \
+              k3 != None and \
+              k4 != None and \
+              k5 != None and \
+              k6 != None and \
+              holdtime):
+            self._k1 = k1
+            self._k2 = k2
+            self._k3 = k3
+            self._k4 = k4
+            self._k5 = k5
+            self._k6 = k6
+            self._holdtime = holdtime
+            self._type = self.TYPE_PARAM
+            self._len = self.FORMATLEN
+        else:
+            raise(ValueError("Either raw or all other values are required, not"
+                             " both."))
+
     def pack(self):
-        return "hi"
+        return struct.pack(self.BASE_FORMAT + self.FORMAT, self._proto,
+                           self._type, self._len, self._k1, self._k2,
+                           self._k3,self._k4, self._k5, self._k6,
+                           self._holdtime)
+
+    def unpack(self, raw):
+        return struct.unpack(self.FORMAT, raw)
 
 
 class RTPPacket(object):
@@ -223,6 +357,9 @@ class RTPHeader2(object):
     OPC_PROBE    = 7
     OPC_SIAQUERY = 10
     OPC_SIAREPLY = 11
+
+    FLAG_INIT = 1
+    FLAG_CR   = 2
 
     def __init__(self, raw=None, hdrver=None, opcode=None, flags=None,
                  seq=None, ack=None, rid=None, asn=None):
