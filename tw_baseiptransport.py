@@ -58,8 +58,8 @@ else:
 reactor_class = type(reactor)
 del sys.modules['twisted.internet.reactor']
 class ReactorWithIPTransport(reactor_class):
-    def listenIP(self, port, protocol, interface='', maxPacketSize=8192):
-        p = IPTransport(port, protocol, interface, maxPacketSize, self)
+    def listenIP(self, port, protocol, interface='', maxPacketSize=8192, listenMultiple=False):
+        p = IPTransport(port, protocol, interface, maxPacketSize, self, listenMultiple)
         p.startListening()
         return p
 reactor = ReactorWithIPTransport()
@@ -68,8 +68,9 @@ installReactor(reactor)
 # Open for suggestions on a name other than IPTransport. The other examples
 # I had were UDPPort and TCPPort -- clearly IPPort isn't a better option.
 # Maybe IPSocket?
-class IPTransport(udp.MulticastMixin, udp.Port):
-    """Provides IP services for layer 4 transport protocols.
+class IPTransport(udp.MulticastPort):
+    """Provides IP services for layer 4 transport protocols, including
+    multicast functionality.
 
     Protocols that use IPTransport will receive and send data directly over
     IP. That is, your protocol doesn't have to deal with anything related
@@ -78,27 +79,19 @@ class IPTransport(udp.MulticastMixin, udp.Port):
     that are not implemented in most kernels -- such as OSPF or EIGRP -- within
     the Twisted framework.
 
-    Using IPTransport is pretty much the same as using UDPPort, except
-    IPTransport takes care of some other IP-related validation during doRead.
-    
+    Using IPTransport is pretty much the same as using UDPPort.
     """
     addressFamily = socket.AF_INET
     socketType = socket.SOCK_RAW
-
-    def __init__(self, port, proto, interface='', maxPacketSize=8192,
-                 reactor=None):
-        base.BasePort.__init__(self, reactor)
-        self.port = port
-        self.protocol = proto
-        self.maxPacketSize = maxPacketSize
-        self.interface = interface
-        self.setLogStr()
-        self._connectedAddr = None
 
     def createInternetSocket(self):
         s = socket.socket(self.addressFamily, self.socketType, self.port)
         s.setblocking(0)
         fdesc._setCloseOnExec(s.fileno())
+        if self.listenMultiple:
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            if hasattr(socket, "SO_REUSEPORT"):
+                s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
         return s
 
     def doRead(self):
@@ -121,18 +114,22 @@ class IPTransport(udp.MulticastMixin, udp.Port):
                     # Strip IP header (including IP options) before passing to
                     # transport protocol.
                     if len(data) < 1:
-                        log.msg("Received invalid packet with data length less than 1 from host %s." % addr[0])
+                        if self.noisy:
+                            log.msg("Received invalid packet with data length less than 1 from host %s." % addr[0])
                         continue
                     iphdrlen = (ord(data[0]) & 0x0f) << 2
                     if iphdrlen < 20:
-                        log.msg("Received malformed packet. IP header len too small: %d bytes" % iphdrlen)
+                        if self.noisy:
+                            log.msg("Received malformed packet. IP header len too small: %d bytes" % iphdrlen)
                         continue
                     if len(data) <= iphdrlen:
-                        log.msg("Received malformed or empty packet from host %s." % addr[0])
+                        if self.noisy:
+                            log.msg("Received malformed or empty packet from host %s." % addr[0])
                         continue
                     totallen = struct.unpack("H", data[3:5])[0]
                     if len(data) != totallen:
-                        log.msg("Received malformed or partial packet from host %s, total length field didn't match received data length." % addr[0])
+                        if self.noisy:
+                            log.msg("Received malformed or partial packet from host %s, total length field didn't match received data length." % addr[0])
                         continue
                     self.protocol.datagramReceived(data[iphdrlen:], addr)
                 except:

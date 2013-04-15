@@ -148,15 +148,15 @@ class EIGRP(protocol.DatagramProtocol):
         hello interval. This should be called at startup and whenever the
         k-values or holdtime changes."""
         hdr = self._rtphdr(opcode=self._rtphdr.OPC_HELLO, flags=0,
-                                       seq=0, ack=0, rid=self._rid,
-                                       asn=self._asn)
+                           seq=0, ack=0, rid=self._rid,
+                           asn=self._asn)
         fields = EIGRPFieldParam(k1=self._kvalues[0],
-                                           k2=self._kvalues[1],
-                                           k3=self._kvalues[2],
-                                           k4=self._kvalues[3],
-                                           k5=self._kvalues[4],
-                                           k6=self._kvalues[5],
-                                           holdtime=self._holdtime)
+                                 k2=self._kvalues[1],
+                                 k3=self._kvalues[2],
+                                 k4=self._kvalues[3],
+                                 k5=self._kvalues[4],
+                                 k6=self._kvalues[5],
+                                 holdtime=self._holdtime)
         self._hello_pkt = RTPPacket(hdr, fields).pack()
 
     def _send_periodic_hello(self):
@@ -199,6 +199,12 @@ class EIGRP(protocol.DatagramProtocol):
         self.log.debug("Processing SIAREPLY")
 
     def run(self):
+        # XXX Binds to 0.0.0.0. Would be nice to only bind to active
+        # interfaces, though this is only a problem if someone sends a unicast
+        # to an interface we didn't intend to listen on. 
+        # We don't join the multicast group on non-active
+        # interfaces, so we shouldn't form adjacencies on non-active
+        # interfaces. This is good.
         reactor.listenIP(88, self)
         self.log.info("EIGRP is starting up...")
         reactor.run()
@@ -209,7 +215,9 @@ class EIGRP(protocol.DatagramProtocol):
         self._sys.cleanup()
 
     def startProtocol(self):
-        pass
+        for iface in self._sys.logical_ifaces:
+            if iface.activated:
+                self.transport.joinGroup(self.DST_IP, iface.ip.ip.exploded)
 
     def stopProtocol(self):
         self.log.info("EIGRP is shutting down.")
@@ -237,7 +245,7 @@ class EIGRP(protocol.DatagramProtocol):
                           "first %d bytes: %s" % (addr, bytes_to_print, \
                           binascii.hexlify(data[:bytes_to_print])))
             return
-        if hdr.hdrver != self._rtphdr.VER:
+        if hdr.ver != self._rtphdr.VER:
             self.log.warn("Received incompatible header version %d from "
                           "host %s" % (hdr.hdrver, addr))
             return
@@ -451,12 +459,16 @@ class RTPHeader2(object):
             self.rid = rid
             self.asn = asn
             self.chksum = 0
+            self.ver = self.VER
         else:
             raise(ValueError("Either 'raw' is required, or all other arguments"
                              " are required."))
 
     def unpack(self, raw):
-        self.VER, self.opcode, self.chksum, self.flags, self.seq, \
+        """Note that self.ver could be different than self.VER if you use
+        this on raw data. If there is ever a new header version, would
+        be nice to make a factory like there is for TLVs."""
+        self.ver, self.opcode, self.chksum, self.flags, self.seq, \
              self.ack, self.rid, self.asn = struct.unpack(self.FORMAT, raw)
 
     def pack(self):
@@ -510,6 +522,14 @@ def parse_args(argv):
     return options, arguments
 
 def main(argv):
+    if not (0x02070000 < sys.hexversion < 0x02080000):
+        sys.stderr.write("Python 2.7 is required. Exiting.\n")
+        return 1
+
+    if not util.is_admin():
+        sys.stderr.write("Must be root/admin. Exiting.\n")
+        return 1
+
     options, arguments = parse_args(argv)
     eigrpserv = EIGRP(options.router_id, options.as_number, options.route, options.import_routes, options.interface, options.log_config, options.admin_port, options.kvalues, options.hello_interval)
     eigrpserv.run()
