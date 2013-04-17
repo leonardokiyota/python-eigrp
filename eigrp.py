@@ -197,6 +197,7 @@ class EIGRP(protocol.DatagramProtocol):
     def _eigrp_op_handler_hello(self, addr, hdr, data):
         self.log.debug("Processing HELLO")
         for tlv in self._fieldfactory.build_all(data):
+            self.log.debug5(tlv)
             if tlv.type == EIGRPFieldParam.TYPE:
                 if tlv.k1 != self._k1 or \
                    tlv.k2 != self._k2 or \
@@ -204,7 +205,6 @@ class EIGRP(protocol.DatagramProtocol):
                    tlv.k4 != self._k4 or \
                    tlv.k5 != self._k5:
                     self.log.debug("Parameter mismatch between potential neighbor at %s. Its kvalues were: %d %d %d %d %d" % (addr, tlv.k1, tlv.k2, tlv.k3, tlv.k4, tlv.k5))
-            self.log.debug5(tlv)
 
     def _eigrp_op_handler_siaquery(self, addr, hdr, data):
         self.log.debug("Processing SIAQUERY")
@@ -274,6 +274,7 @@ class EIGRP(protocol.DatagramProtocol):
                           (hdr.opcode, addr))
             return
         handler(addr, hdr, payload)
+        self.log.debug("Finished handling opcode.")
 
 
 class EIGRPException(Exception):
@@ -403,12 +404,19 @@ class EIGRPFieldParam(EIGRPField):
 class RTPPacket(object):
     def __init__(self, hdr, fields):
         self.hdr = hdr
-        self.fields = fields
+        try:
+            iter(fields)
+        except TypeError:
+            self.fields = [fields]
+        else:
+            self.fields = fields
 
     def pack(self):
         self.hdr.chksum = 0
         prehdr = self.hdr.pack()
-        fields = self.fields.pack()
+        fields = ""
+        for f in self.fields:
+            fields += f.pack()
         self.hdr.chksum = self.calc_chksum(prehdr, fields)
         hdr = self.hdr.pack()
         return hdr + fields
