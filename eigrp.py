@@ -29,6 +29,7 @@ import binascii
 from twisted.internet import protocol
 from twisted.python import log
 import ipaddr
+from heapq import heappush, heappop
 
 import tw_baseiptransport
 from tw_baseiptransport import reactor
@@ -37,7 +38,7 @@ import util
 
 class EIGRP(protocol.DatagramProtocol):
 
-    DEFAULT_K_VALUES = [ 1, 74, 1, 0, 0, 0 ]
+    DEFAULT_K_VALUES = [ 1, 74, 1, 0, 0 ]
     DEFAULT_HT_MULTIPLIER = 3
 
     DST_IP = "224.0.0.10"
@@ -59,7 +60,7 @@ class EIGRP(protocol.DatagramProtocol):
         admin_port -- The TCP port to bind to the administrative interface
                       (not implemented)
         kvalues -- Iterable of K-value weights. Indexes are mapped to K1
-                    through K6 (index 0 -> K1). If None, use defaults.
+                    through K5 (index 0 -> K1). If None, use defaults.
         hello_interval -- The hello interval. Also influences holdtime.
         hdrver -- Version of the RTP header to use. Only 2 is supported.
         """
@@ -98,7 +99,11 @@ class EIGRP(protocol.DatagramProtocol):
             raise(TypeError("kvalues must be an iterable."))
             if not sum(kvalues):
                 raise(ValueError("At least one kvalue must be non-zero."))
-        self._kvalues = kvalues
+        self._k1 = kvalues[0]
+        self._k2 = kvalues[1]
+        self._k3 = kvalues[2]
+        self._k4 = kvalues[3]
+        self._k5 = kvalues[4]
 
         if hdrver == 2:
             self._rtphdr = RTPHeader2
@@ -116,6 +121,7 @@ class EIGRP(protocol.DatagramProtocol):
         self._build_hello_pkt()
         for iface in requested_ifaces:
             self.activate_iface(iface)
+        self._fieldfactory = EIGRPFieldFactory()
         reactor.callWhenRunning(self._send_periodic_hello)
         #eigrpadmin.run(self, port=admin_port)
 
@@ -150,12 +156,11 @@ class EIGRP(protocol.DatagramProtocol):
         hdr = self._rtphdr(opcode=self._rtphdr.OPC_HELLO, flags=0,
                            seq=0, ack=0, rid=self._rid,
                            asn=self._asn)
-        fields = EIGRPFieldParam(k1=self._kvalues[0],
-                                 k2=self._kvalues[1],
-                                 k3=self._kvalues[2],
-                                 k4=self._kvalues[3],
-                                 k5=self._kvalues[4],
-                                 k6=self._kvalues[5],
+        fields = EIGRPFieldParam(k1=self._k1,
+                                 k2=self._k2,
+                                 k3=self._k3,
+                                 k4=self._k4,
+                                 k5=self._k5,
                                  holdtime=self._holdtime)
         self._hello_pkt = RTPPacket(hdr, fields).pack()
 
@@ -191,6 +196,15 @@ class EIGRP(protocol.DatagramProtocol):
 
     def _eigrp_op_handler_hello(self, addr, hdr, data):
         self.log.debug("Processing HELLO")
+        for tlv in self._fieldfactory.build_all(data):
+            if tlv.type == EIGRPFieldParam.TYPE:
+                if tlv.k1 != self._k1 or \
+                   tlv.k2 != self._k2 or \
+                   tlv.k3 != self._k3 or \
+                   tlv.k4 != self._k4 or \
+                   tlv.k5 != self._k5:
+                    self.log.debug("Parameter mismatch between potential neighbor at %s. Its kvalues were: %d %d %d %d %d" % (addr, tlv.k1, tlv.k2, tlv.k3, tlv.k4, tlv.k5))
+            self.log.debug5(tlv)
 
     def _eigrp_op_handler_siaquery(self, addr, hdr, data):
         self.log.debug("Processing SIAQUERY")
@@ -280,29 +294,42 @@ class FormatException(EIGRPException):
 class EIGRPFieldFactory(object):
     """Factory for EIGRP TLV fields."""
 
+    def build_all(self, raw):
+        """Generator to yield all parsed TLVs from raw data."""
+        index = 0
+        rawlen = len(raw)
+        while index < rawlen:
+            tlv = self.build(raw[index:])
+            index += tlv.BASE_FORMATLEN + tlv.FORMATLEN
+            yield tlv
+
     def build(self, raw):
-        """Returns the TLV parsed from the raw data."""
+        """Returns one TLV parsed from raw data."""
         try:
             _proto, _type, _len = struct.unpack(EIGRPField.BASE_FORMAT,
                                                raw[:EIGRPField.BASE_FORMATLEN])
             if _type == EIGRPFieldParam.TYPE:
-                return EIGRPFieldParam(raw=raw[EIGRPField.BASE_FORMATLEN:])
+                tlv = EIGRPFieldParam(raw=raw[EIGRPField.BASE_FORMATLEN:EIGRPFieldParam.FULL_LEN])
             elif _type == EIGRPFieldAuth.TYPE:
-                return EIGRPFieldAuth(raw=raw[EIGRPField.BASE_FORMATLEN:])
+                tlv = EIGRPFieldAuth(raw=raw[EIGRPField.BASE_FORMATLEN:EIGRPFieldAuth.FULL_LEN])
             elif _type == EIGRPFieldSeq.TYPE:
-                return EIGRPFieldSeq(raw=raw[EIGRPField.BASE_FORMATLEN:])
+                tlv = EIGRPFieldSeq(raw=raw[EIGRPField.BASE_FORMATLEN:EIGRPFieldSeq.FULL_LEN])
             elif _type == EIGRPFieldSwVersion.TYPE:
-                return EIGRPFieldSwVersion(raw=raw[EIGRPField.BASE_FORMATLEN:])
+                tlv = EIGRPFieldSwVersion(raw=raw[EIGRPField.BASE_FORMATLEN:EIGRPFieldSwVersion.FULL_LEN])
             elif _type == EIGRPFieldMulticastSeq.TYPE:
-                return EIGRPFieldMulticastSeq(raw=raw[EIGRPField.BASE_FORMATLEN:])
+                tlv = EIGRPFieldMulticastSeq(raw=raw[EIGRPField.BASE_FORMATLEN:EIGRPFieldMulticastSeq.FULL_LEN])
             elif _type == EIGRPFieldPeerInfo.TYPE:
-                return EIGRPFieldPeerInfo(raw=raw[EIGRPField.BASE_FORMATLEN:])
+                tlv = EIGRPFieldPeerInfo(raw=raw[EIGRPField.BASE_FORMATLEN:EIGRPFieldPeerInfo.FULL_LEN])
             elif _type == EIGRPFieldPeerTerm.TYPE:
-                return EIGRPFieldPeerTerm(raw=raw[EIGRPField.BASE_FORMATLEN:])
+                tlv = EIGRPFieldPeerTerm(raw=raw[EIGRPField.BASE_FORMATLEN:EIGRPFieldPeerTerm.FULL_LEN])
             else:
                 raise(ValueError("Unknown type in TLV: %d" % _type))
         except struct.error:
             raise(FormatException("Unpacking failed (malformed TLV?)."))
+        tlv.proto = _proto
+        tlv.type = _type
+        tlv.len = _len
+        return tlv
 
 
 class EIGRPField(object):
@@ -320,7 +347,7 @@ class EIGRPField(object):
             proto = self.PROTO_GENERIC
         if proto != self.PROTO_GENERIC:
             raise(ValueError("Only PROTO_GENERIC is supported."))
-        self._proto = proto
+        self.proto = proto
 
 
 class EIGRPFieldParam(EIGRPField):
@@ -328,11 +355,12 @@ class EIGRPFieldParam(EIGRPField):
 
     TYPE = 1
 
-    FORMAT = "BBBBBBH"
+    FORMAT = "BBBBBxH"
     FORMATLEN = struct.calcsize(FORMAT)
+    FULL_LEN = FORMATLEN + EIGRPField.BASE_FORMATLEN
 
     def __init__(self, raw=None, k1=None, k2=None, k3=None, k4=None, k5=None,
-                 k6=None, holdtime=None, *args, **kwargs):
+                 holdtime=None, *args, **kwargs):
         super(EIGRPField, self).__thisclass__.__init__(self, *args, **kwargs)
         if raw and \
            not (k1 != None or \
@@ -340,39 +368,33 @@ class EIGRPFieldParam(EIGRPField):
                 k3 != None or \
                 k4 != None or \
                 k5 != None or \
-                k6 != None or \
                 holdtime):
-            self._k1, self._k2, self._k3, self._k4, self._k5, self._k6, \
-                      self._holdtime = self.unpack(raw)
+            self.k1, self.k2, self.k3, self.k4, self.k5, \
+                      self.holdtime = self.unpack(raw)
         elif not raw and \
              (k1 != None and \
               k2 != None and \
               k3 != None and \
               k4 != None and \
               k5 != None and \
-              k6 != None and \
               holdtime):
-            self._k1 = k1
-            self._k2 = k2
-            self._k3 = k3
-            self._k4 = k4
-            self._k5 = k5
-            self._k6 = k6
-            self._holdtime = holdtime
-            self._type = self.TYPE
-
-            # Don't like adding the BASE len here... probably a better
-            # way to do this.
-            self._len = self.FORMATLEN + self.BASE_FORMATLEN
+            self.k1 = k1
+            self.k2 = k2
+            self.k3 = k3
+            self.k4 = k4
+            self.k5 = k5
+            self.holdtime = holdtime
+            self.type = self.TYPE
+            self.len = self.FULL_LEN
         else:
             raise(ValueError("Either raw or all other values are required, not"
                              " both."))
 
     def pack(self):
-        return struct.pack(self.BASE_FORMAT + self.FORMAT, self._proto,
-                           self._type, self._len, self._k1, self._k2,
-                           self._k3,self._k4, self._k5, self._k6,
-                           self._holdtime)
+        return struct.pack(self.BASE_FORMAT + self.FORMAT, self.proto,
+                           self.type, self.len, self.k1, self.k2,
+                           self.k3,self.k4, self.k5,
+                           self.holdtime)
 
     def unpack(self, raw):
         return struct.unpack(self.FORMAT, raw)
@@ -475,6 +497,20 @@ class RTPHeader2(object):
         return struct.pack(self.FORMAT, self.VER, self.opcode, self.chksum,
                            self.flags, self.seq, self.ack, self.rid,
                            self.asn)
+
+
+class RTPNeighbor(object):
+    """A router learned via neighbor discovery."""
+
+    def __init__(self, ip, iface, seq, holdtime):
+        self.iface = ipaddr.IPv4Address(iface)
+        self.holdtime = holdtime
+        ip = ipaddr.IPv4Address(ip)
+        self._seq = seq
+        self._ack = 0
+        self.reply_pending = False
+        self.queue = list()
+
 
 def parse_args(argv):
     op = optparse.OptionParser()
