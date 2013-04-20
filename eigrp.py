@@ -26,6 +26,7 @@ import logging.config
 import functools
 import struct
 import binascii
+import time
 from twisted.internet import protocol
 from twisted.python import log
 import ipaddr
@@ -89,16 +90,16 @@ class EIGRP(protocol.DatagramProtocol):
         self._holdtime = self._hello_interval * self._ht_multiplier
 
         if not kvalues or \
-           len(kvalues) != 6:
-            raise(ValueError("Exactly 6 K-values must be present."))
+           len(kvalues) != 5:
+            raise(ValueError("Exactly 5 K-values must be present."))
         try:
             for k in kvalues:
                 if not (0 <= k <= 255):
                     raise(ValueError("Each kvalue must be between 0 and 255."))
         except TypeError:
             raise(TypeError("kvalues must be an iterable."))
-            if not sum(kvalues):
-                raise(ValueError("At least one kvalue must be non-zero."))
+        if not sum(kvalues):
+            raise(ValueError("At least one kvalue must be non-zero."))
         self._k1 = kvalues[0]
         self._k2 = kvalues[1]
         self._k3 = kvalues[2]
@@ -122,6 +123,7 @@ class EIGRP(protocol.DatagramProtocol):
         for iface in requested_ifaces:
             self.activate_iface(iface)
         self._fieldfactory = EIGRPFieldFactory()
+        self._neighbors = list()
         reactor.callWhenRunning(self._send_periodic_hello)
         #eigrpadmin.run(self, port=admin_port)
 
@@ -182,21 +184,21 @@ class EIGRP(protocol.DatagramProtocol):
         self._op_handlers[self._rtphdr.OPC_SIAQUERY] = self._eigrp_op_handler_siaquery
         self._op_handlers[self._rtphdr.OPC_SIAREPLY] = self._eigrp_op_handler_siareply
 
-    def _eigrp_op_handler_update(self, addr, hdr, data):
+    def _eigrp_op_handler_update(self, addr, hdr, tlvs):
         self.log.debug("Processing UPDATE")
 
-    def _eigrp_op_handler_request(self, addr, hdr, data):
+    def _eigrp_op_handler_request(self, addr, hdr, tlvs):
         self.log.debug("Processing REQUEST")
 
-    def _eigrp_op_handler_query(self, addr, hdr, data):
+    def _eigrp_op_handler_query(self, addr, hdr, tlvs):
         self.log.debug("Processing QUERY")
 
-    def _eigrp_op_handler_reply(self, addr, hdr, data):
+    def _eigrp_op_handler_reply(self, addr, hdr, tlvs):
         self.log.debug("Processing REPLY")
 
-    def _eigrp_op_handler_hello(self, addr, hdr, data):
+    def _eigrp_op_handler_hello(self, addr, hdr, tlvs):
         self.log.debug("Processing HELLO")
-        for tlv in self._fieldfactory.build_all(data):
+        for tlv in tlvs:
             self.log.debug5(tlv)
             if tlv.type == EIGRPFieldParam.TYPE:
                 if tlv.k1 != self._k1 or \
@@ -205,6 +207,20 @@ class EIGRP(protocol.DatagramProtocol):
                    tlv.k4 != self._k4 or \
                    tlv.k5 != self._k5:
                     self.log.debug("Parameter mismatch between potential neighbor at %s. Its kvalues were: %d %d %d %d %d" % (addr, tlv.k1, tlv.k2, tlv.k3, tlv.k4, tlv.k5))
+        neighbor = self._get_neighbor(addr)
+        if not neighbor:
+            # XXX Get actual physical iface? Spec says I ought to
+            self._add_neighbor(addr, "IFACE", hdr.seq, tlv.holdtime)
+            self.log.debug("New pending neighbor: %s" % addr)
+
+    def _get_neighbor(self, ip):
+        for neighbor in self._neighbors:
+            if neighbor.ip.exploded == ip:
+                return neighbor
+        return None
+
+    def _add_neighbor(self, addr, iface, seq, holdtime):
+        self._neighbors.append(RTPNeighbor(addr, iface, seq, holdtime))
 
     def _eigrp_op_handler_siaquery(self, addr, hdr, data):
         self.log.debug("Processing SIAQUERY")
@@ -241,9 +257,8 @@ class EIGRP(protocol.DatagramProtocol):
         addr = addr_and_zero[0]
         self.log.debug5("Received datagram from %s" % addr)
         host_local = False
-        addr = ipaddr.IPv4Address(addr)
         for local_iface in self._sys.logical_ifaces:
-            if local_iface.ip.ip.exploded == addr.exploded:
+            if local_iface.ip.ip.exploded == addr:
                 host_local = True
                 break
         if host_local:
@@ -259,6 +274,11 @@ class EIGRP(protocol.DatagramProtocol):
                           "first %d bytes: %s" % (addr, bytes_to_print, \
                           binascii.hexlify(data[:bytes_to_print])))
             return
+        tlvs = self._fieldfactory.build_all(data[self._rtphdr.HEADERLEN:])
+        pkt = RTPPacket(hdr, tlvs)
+        if pkt.hdr.chksum != hdr.chksum:
+            self.log.debug("Bad checksum received from %s. Expected 0x%x, was 0x%x" % (addr, pkt.hdr.chksum, hdr.chksum))
+            return
         if hdr.ver != self._rtphdr.VER:
             self.log.warn("Received incompatible header version %d from "
                           "host %s" % (hdr.hdrver, addr))
@@ -273,7 +293,7 @@ class EIGRP(protocol.DatagramProtocol):
             self.log.info("Received invalid/unhandled opcode %d from %s" % \
                           (hdr.opcode, addr))
             return
-        handler(addr, hdr, payload)
+        handler(addr, hdr, tlvs)
         self.log.debug("Finished handling opcode.")
 
 
@@ -417,21 +437,17 @@ class RTPPacket(object):
         fields = ""
         for f in self.fields:
             fields += f.pack()
-        self.hdr.chksum = self.calc_chksum(prehdr, fields)
+        self.hdr.chksum = self.calc_chksum(prehdr + fields)
         hdr = self.hdr.pack()
         return hdr + fields
 
     # Checksum related functions are from:
     # http://stackoverflow.com/questions/1767910/checksum-udp-calculation-python
     @staticmethod
-    def calc_chksum(prehdr, fields):
-        """Get one's complement of the one's complement sum. Covers header
-        fields and the TLVs.
-        prehdr should be the packed header, with checksum set to 0
-        fields should be the packed TLV fields (not in a list)
+    def calc_chksum(data):
+        """Get one's complement of the one's complement sum of data.
         Returns the 16 bit checksum.
         """
-        data = prehdr + fields
         data = map(lambda x: ord(x), data)
         data = struct.pack("%dB" % len(data), *data)
         s = 0
@@ -510,14 +526,19 @@ class RTPHeader2(object):
 class RTPNeighbor(object):
     """A router learned via neighbor discovery."""
 
+    STATE_PENDING = 1
+    STATE_UP      = 2
+
     def __init__(self, ip, iface, seq, holdtime):
-        self.iface = ipaddr.IPv4Address(iface)
+        self.iface = iface
         self.holdtime = holdtime
-        ip = ipaddr.IPv4Address(ip)
+        self.ip = ipaddr.IPv4Address(ip)
         self._seq = seq
         self._ack = 0
         self.reply_pending = False
         self.queue = list()
+        self.state = self.STATE_PENDING
+        self.last_heard = time.time()
 
 
 def parse_args(argv):
@@ -539,7 +560,7 @@ def parse_args(argv):
     op.add_option("-l", "--log-config", default="logging.conf",
                   help="The logging configuration file "
                         "(default logging.conf).")
-    op.add_option("-k", "--kvalues", type="str", default="1,74,1,0,0,0",
+    op.add_option("-k", "--kvalues", type="str", default="1,74,1,0,0",
                   help="Use non-default K-values (metric coefficients).")
     op.add_option("-t", "--hello-interval", type="int", default=5,
                   help="Use non-default hello timer. Hold time is 3 times the"
@@ -551,9 +572,9 @@ def parse_args(argv):
 
     # Turn kvalues into a list
     options.kvalues = options.kvalues.split(",")
-    if len(options.kvalues) != 6:
-        op.error("K-Values must be a comma separated list (e.g. "
-                 "1,74,1,0,0,0).")
+    if len(options.kvalues) != 5:
+        op.error("Five k-values must be present in a comma separated list "
+                 "(e.g. 1,74,1,0,0).")
     try:
         for index, k in enumerate(options.kvalues[:]):
             options.kvalues[index] = int(k)

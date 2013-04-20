@@ -114,22 +114,18 @@ class IPTransport(udp.MulticastPort):
                     # Strip IP header (including IP options) before passing to
                     # transport protocol.
                     if len(data) < 1:
-                        if self.noisy:
-                            log.msg("Received invalid packet with data length less than 1 from host %s." % addr[0])
+                        log.msg("Received invalid packet with data length less than 1 from host %s." % addr[0])
                         continue
                     iphdrlen = (ord(data[0]) & 0x0f) << 2
                     if iphdrlen < 20:
-                        if self.noisy:
-                            log.msg("Received malformed packet. IP header len too small: %d bytes" % iphdrlen)
+                        log.msg("Received malformed packet. IP header len too small: %d bytes" % iphdrlen)
                         continue
                     if len(data) <= iphdrlen:
-                        if self.noisy:
-                            log.msg("Received malformed or empty packet from host %s." % addr[0])
+                        log.msg("Received malformed or empty packet from host %s." % addr[0])
                         continue
                     totallen = struct.unpack("H", data[3:5])[0]
                     if len(data) != totallen:
-                        if self.noisy:
-                            log.msg("Received malformed or partial packet from host %s, total length field didn't match received data length." % addr[0])
+                        log.msg("Received malformed or partial packet from host %s, total length field didn't match received data length." % addr[0])
                         continue
                     self.protocol.datagramReceived(data[iphdrlen:], addr)
                 except:
