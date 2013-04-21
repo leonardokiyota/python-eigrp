@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 
-"""A Python implementation of EIGRP."""
+"""A Python implementation of EIGRP based on Cisco's draft informational RFC
+located here: http://www.ietf.org/id/draft-savage-eigrp-00.txt"""
 
 # Python-EIGRP (http://python-eigrp.googlecode.com)
 # Copyright (C) 2013 Patrick F. Allen
@@ -27,7 +28,7 @@ import functools
 import struct
 import binascii
 import time
-from twisted.internet import protocol
+from twisted.internet import protocol, base
 from twisted.python import log
 import ipaddr
 from heapq import heappush, heappop
@@ -124,6 +125,8 @@ class EIGRP(protocol.DatagramProtocol):
             self.activate_iface(iface)
         self._fieldfactory = EIGRPFieldFactory()
         self._neighbors = list()
+        self._seq = 1
+        self._crmode = False
         reactor.callWhenRunning(self._send_periodic_hello)
         #eigrpadmin.run(self, port=admin_port)
 
@@ -134,7 +137,7 @@ class EIGRP(protocol.DatagramProtocol):
                 sys_iface.activated = True
                 return
         raise(ValueError("Requested IP %s is unusable. (Is it assigned to this"
-                         " machine on a usable interface?)" % iface))
+                         " machine on a usable interface?)" % req_iface))
 
     def _init_logging(self, log_config):
         # debug1 is less verbose, debug5 is more verbose.
@@ -170,9 +173,15 @@ class EIGRP(protocol.DatagramProtocol):
         self.log.debug2("Sending periodic hello.")
         for iface in self._sys.logical_ifaces:
             if iface.activated:
-                self.transport.setOutgoingInterface(iface.ip.ip.exploded)
-                self.transport.write(self._hello_pkt, (self.DST_IP, 0))
+                self._write(self._hello_pkt, self.DST_IP, iface.ip.ip.exploded)
         reactor.callLater(self._hello_interval, self._send_periodic_hello)
+
+    def _write(self, msg, dst, src=None):
+        self.log.debug5("Writing packet to %s, iface %s." % (dst, \
+                        src or "unspecified"))
+        if src:
+            self.transport.setOutgoingInterface(src)
+        self.transport.write(msg, (dst, 0))
 
     def _register_op_handlers(self):
         self._op_handlers = dict()
@@ -212,6 +221,8 @@ class EIGRP(protocol.DatagramProtocol):
             # XXX Get actual physical iface? Spec says I ought to
             self._add_neighbor(addr, "IFACE", hdr.seq, tlv.holdtime)
             self.log.debug("New pending neighbor: %s" % addr)
+        else:
+            neighbor.last_heard = time.time()
 
     def _get_neighbor(self, ip):
         for neighbor in self._neighbors:
@@ -220,7 +231,71 @@ class EIGRP(protocol.DatagramProtocol):
         return None
 
     def _add_neighbor(self, addr, iface, seq, holdtime):
-        self._neighbors.append(RTPNeighbor(addr, iface, seq, holdtime))
+        neighbor = RTPNeighbor(addr, iface, seq, holdtime)
+        self._neighbors.append(neighbor)
+        self._send_update(neighbor)
+
+        if len(self._neighbors) == 1:
+            nextcall = neighbor.holdtime + 1
+            self._next_holdtime_check = time.time() + nextcall
+            self.log.debug("Checking neighbor holdtimes in %d second(s)." % \
+                           nextcall)
+            reactor.callLater(nextcall, self._check_neighbor_holdtimes)
+        else:
+            if time.time() + neighbor.holdtime + 1 >= \
+                                                self._next_holdtime_check:
+                return
+
+            # New neighbor has a shorter holdtime than the wait until we
+            # were going to check holdtimes again. Check holdtimes sooner.
+            # If we don't do this and our first neighbor sends us a packet
+            # with a huge holdtime, then if we get a new neighbor we wouldn't
+            # check the new neighbor's holdtime until the huge holdtime
+            # expires.
+            for call in reactor.getDelayedCalls():
+                if call.func == self._check_neighbor_holdtimes:
+                    nextcall = neighbor.holdtime + 1
+                    self._next_holdtime_check = time.time() + nextcall
+                    call.reset(nextcall)
+                    self.log.debug("Neighbor caused a change in the holdtime "
+                                   "check timer. Checking neighbor holdtimes "
+                                   "again in %d second(s)." % nextcall)
+
+    def _send_update(self, neighbor, init=False):
+        """Send an update packet. Used after discovering a new neighbor."""
+        hdr = self._rtphdr(opcode=self._rtphdr.OPC_UPDATE,
+                           flags=self._rtphdr.FLAG_INIT,
+                           seq=self._seq,
+                           ack=0,
+                           rid=self._rid,
+                           asn=self._asn)
+        tlvs = [] # XXX
+        pkt = RTPPacket(hdr, tlvs)
+        neighbor.pushmsg(pkt)
+
+    def _check_neighbor_holdtimes(self):
+        self.log.debug("Checking neighbor holdtimes.")
+        nextcall = sys.maxint
+        now = time.time()
+        for neighbor in self._neighbors[:]:
+            expiration = (neighbor.last_heard + neighbor.holdtime) - now
+            if expiration < 1:
+                self._del_neighbor(neighbor)
+            elif expiration < nextcall:
+                nextcall = expiration + 1
+        if not len(self._neighbors):
+            self.log.debug("No more neighbors.")
+            assert(nextcall == sys.maxint)
+        else:
+            self.log.debug("Checking neighbor holdtimes again in %d"
+                           " second(s)." % nextcall)
+            self._next_holdtime_check = now + nextcall
+            reactor.callLater(nextcall, self._check_neighbor_holdtimes)
+
+    def _del_neighbor(self, neighbor):
+        # XXX Delete routes etc.
+        self.log.debug("Deleting neighbor: %s" % neighbor)
+        self._neighbors.remove(neighbor)
 
     def _eigrp_op_handler_siaquery(self, addr, hdr, data):
         self.log.debug("Processing SIAQUERY")
@@ -243,6 +318,50 @@ class EIGRP(protocol.DatagramProtocol):
         # XXX Add cleanup for routes when we have any to remove
         self.log.info("Cleaning up.")
         self._sys.cleanup()
+
+    def _rtp_receive(self, addr, hdr):
+        """Process the reliable packet.
+        Returns True if processing should continue on the packet,
+        otherwise returns False."""
+        neighbor = self._get_neighbor(addr)
+        if not neighbor:
+            if hdr.opcode != self._rtphdr.OPC_HELLO:
+                self.log.debug("Received non-hello packet from non-neighbor."
+                               " Opcode: %d" % (addr, hdr.opcode))
+                return False
+            else:
+                return True
+        if hdr.flags & self._rtphdr.FLAG_CR:
+            if not self._crmode:
+                self.log.debug5("CR flag on packet but we are not in CR mode.")
+                return False
+            else:
+                self.log.debug5("CR flag on packet and we are in CR mode.")
+        if not hdr.seq:
+            # Packet was not reliably transmitted
+            return True
+        if hdr.seq == neighbor.seq:
+            self.log.debug5("Received duplicate sequence number.")
+            # Already received this packet, discard and send an ack
+            self._send_ack(addr, hdr.seq)
+            return False
+
+        # XXX Deal with sequence number wrapping, skip 0
+        if hdr.seq != neighbor.seq + 1:
+            # Out of order packet
+            self.log.debug5("Neighbor sent SEQ %d, expected %d." % \
+                           (hdr.seq, neighbor.seq))
+            return False
+        # Send ack for received packet and allow processing
+        self._send_ack(addr, hdr.seq)
+        neighbor.seq = hdr.seq
+        return True
+
+    def _send_ack(self, addr, ack):
+        hdr = self._rtphdr(opcode=self._rtphdr.OPC_HELLO, flags=0, seq=0,
+                           ack=ack, rid=self._rid, asn=self._asn)
+        pkt = RTPPacket(hdr, []).pack()
+        self._write(pkt, addr)
 
     def startProtocol(self):
         for iface in self._sys.logical_ifaces:
@@ -274,19 +393,25 @@ class EIGRP(protocol.DatagramProtocol):
                           "first %d bytes: %s" % (addr, bytes_to_print, \
                           binascii.hexlify(data[:bytes_to_print])))
             return
-        tlvs = self._fieldfactory.build_all(data[self._rtphdr.HEADERLEN:])
-        pkt = RTPPacket(hdr, tlvs)
-        if pkt.hdr.chksum != hdr.chksum:
-            self.log.debug("Bad checksum received from %s. Expected 0x%x, was 0x%x" % (addr, pkt.hdr.chksum, hdr.chksum))
+        observed_chksum = hdr.chksum
+        hdr.chksum = 0
+        payload = data[self._rtphdr.HEADERLEN:]
+        real_chksum = RTPPacket.calc_chksum(hdr.pack() + payload)
+        if real_chksum != observed_chksum:
+            self.log.debug("Bad checksum: expected 0x%x, was 0x%x" % (addr, real_chksum, real_chksum))
             return
         if hdr.ver != self._rtphdr.VER:
             self.log.warn("Received incompatible header version %d from "
                           "host %s" % (hdr.hdrver, addr))
             return
 
-        # XXX RTP, ND/NR processing here
+        tlvs = self._fieldfactory.build_all(payload)
+        if not self._rtp_receive(addr, hdr):
+            self.log.debug5("RTP rejected packet.")
+            return
+        else:
+            self.log.debug5("RTP accepted packet for processing.")
  
-        payload = data[self._rtphdr.HEADERLEN:]
         try:
             handler = self._op_handlers[hdr.opcode]
         except KeyError:
@@ -330,22 +455,23 @@ class EIGRPFieldFactory(object):
             _proto, _type, _len = struct.unpack(EIGRPField.BASE_FORMAT,
                                                raw[:EIGRPField.BASE_FORMATLEN])
             if _type == EIGRPFieldParam.TYPE:
-                tlv = EIGRPFieldParam(raw=raw[EIGRPField.BASE_FORMATLEN:EIGRPFieldParam.FULL_LEN])
+                tlv = EIGRPFieldParam(raw=raw[:EIGRPFieldParam.FORMATLEN])
             elif _type == EIGRPFieldAuth.TYPE:
-                tlv = EIGRPFieldAuth(raw=raw[EIGRPField.BASE_FORMATLEN:EIGRPFieldAuth.FULL_LEN])
+                tlv = EIGRPFieldAuth(raw=raw[:EIGRPFieldAuth.FORMATLEN])
             elif _type == EIGRPFieldSeq.TYPE:
-                tlv = EIGRPFieldSeq(raw=raw[EIGRPField.BASE_FORMATLEN:EIGRPFieldSeq.FULL_LEN])
+                tlv = EIGRPFieldSeq(raw=raw[:EIGRPFieldSeq.FORMATLEN])
             elif _type == EIGRPFieldSwVersion.TYPE:
-                tlv = EIGRPFieldSwVersion(raw=raw[EIGRPField.BASE_FORMATLEN:EIGRPFieldSwVersion.FULL_LEN])
+                tlv = EIGRPFieldSwVersion(raw=raw[:EIGRPFieldSwVersion.FORMATLEN])
             elif _type == EIGRPFieldMulticastSeq.TYPE:
-                tlv = EIGRPFieldMulticastSeq(raw=raw[EIGRPField.BASE_FORMATLEN:EIGRPFieldMulticastSeq.FULL_LEN])
+                tlv = EIGRPFieldMulticastSeq(raw=raw[:EIGRPFieldMulticastSeq.FORMATLEN])
             elif _type == EIGRPFieldPeerInfo.TYPE:
-                tlv = EIGRPFieldPeerInfo(raw=raw[EIGRPField.BASE_FORMATLEN:EIGRPFieldPeerInfo.FULL_LEN])
+                tlv = EIGRPFieldPeerInfo(raw=raw[:EIGRPFieldPeerInfo.FORMATLEN])
             elif _type == EIGRPFieldPeerTerm.TYPE:
-                tlv = EIGRPFieldPeerTerm(raw=raw[EIGRPField.BASE_FORMATLEN:EIGRPFieldPeerTerm.FULL_LEN])
+                tlv = EIGRPFieldPeerTerm(raw=raw[:EIGRPFieldPeerTerm.FORMATLEN])
             else:
                 raise(ValueError("Unknown type in TLV: %d" % _type))
         except struct.error:
+            raise
             raise(FormatException("Unpacking failed (malformed TLV?)."))
         tlv.proto = _proto
         tlv.type = _type
@@ -370,15 +496,17 @@ class EIGRPField(object):
             raise(ValueError("Only PROTO_GENERIC is supported."))
         self.proto = proto
 
+    def _pack(self, *args):
+        return struct.pack(self.FORMAT, self.proto, self.type, self.len, *args)
+
 
 class EIGRPFieldParam(EIGRPField):
     """Parameter type TLV"""
 
     TYPE = 1
 
-    FORMAT = "BBBBBxH"
+    FORMAT = EIGRPField.BASE_FORMAT + "BBBBBxH"
     FORMATLEN = struct.calcsize(FORMAT)
-    FULL_LEN = FORMATLEN + EIGRPField.BASE_FORMATLEN
 
     def __init__(self, raw=None, k1=None, k2=None, k3=None, k4=None, k5=None,
                  holdtime=None, *args, **kwargs):
@@ -390,8 +518,8 @@ class EIGRPFieldParam(EIGRPField):
                 k4 != None or \
                 k5 != None or \
                 holdtime):
-            self.k1, self.k2, self.k3, self.k4, self.k5, \
-                      self.holdtime = self.unpack(raw)
+            self.proto, self.type, self.len, self.k1, self.k2, self.k3, self.k4, \
+                        self.k5, self.holdtime = self.unpack(raw)
         elif not raw and \
              (k1 != None and \
               k2 != None and \
@@ -406,16 +534,13 @@ class EIGRPFieldParam(EIGRPField):
             self.k5 = k5
             self.holdtime = holdtime
             self.type = self.TYPE
-            self.len = self.FULL_LEN
+            self.len = self.FORMATLEN
         else:
             raise(ValueError("Either raw or all other values are required, not"
                              " both."))
 
     def pack(self):
-        return struct.pack(self.BASE_FORMAT + self.FORMAT, self.proto,
-                           self.type, self.len, self.k1, self.k2,
-                           self.k3,self.k4, self.k5,
-                           self.holdtime)
+        return self._pack(self.k1, self.k2, self.k3, self.k4, self.k5, self.holdtime)
 
     def unpack(self, raw):
         return struct.unpack(self.FORMAT, raw)
@@ -533,12 +658,31 @@ class RTPNeighbor(object):
         self.iface = iface
         self.holdtime = holdtime
         self.ip = ipaddr.IPv4Address(ip)
-        self._seq = seq
-        self._ack = 0
+        self.seq = seq
+        self.ack = 0
         self.reply_pending = False
-        self.queue = list()
+        self._queue = list()
         self.state = self.STATE_PENDING
         self.last_heard = time.time()
+
+    def popmsg(self):
+        """Pop an RTP message off of the transmission queue."""
+        try:
+            return heappop(self._queue)
+        except IndexError:
+            return None
+
+    def pushmsg(self, msg):
+        """Push an RTP message onto the transmission queue."""
+        return heappush(self._queue, msg)
+
+    def peekmsg(self, msg):
+        """Return the RTP message that will be popped on the next popmsg
+        call."""
+        try:
+            return self._queue[0]
+        except IndexError:
+            return None
 
 
 def parse_args(argv):
