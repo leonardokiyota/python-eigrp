@@ -479,77 +479,107 @@ class TLVFactory(object):
             #raise(FormatException("Unpacking failed (malformed TLV?)."))
 
 
+class ValueMetaclass(type):
+    """Metaclass for values in the TLV.
+    Calculates the format length (LEN) and assigns a brief NAME attribute
+    based on the class name."""
+    def __init__(cls, name, bases, dct):
+        super(type, cls).__thisclass__.__init__(cls, name, bases, dct)
+        if hasattr(cls, "FORMAT"):
+            cls.LEN = struct.calcsize(cls.FORMAT)
+        cls.NAME = name.lstrip("Value").lstrip("Classic").lower()
+
+
 class ValueBase(object):
-    """Base class for the "value" section of a TLV."""
-    def __init__(self, raw="", **kwargs):
-        if raw:
-            for k, v in map(None, self.FIELDS, self.unpack(raw)):
+    """Base class for the "value" section of a TLV.
+
+    Derived classes should have FIELDS, FORMAT, and LEN class attributes.
+    FIELDS should be a list of strings describing the fields within the value.
+    FORMAT is the format to be used with struct.pack/unpack.
+    LEN is the return value of struct.calcsize called on FORMAT.
+
+    Derived classes may also have to override the unpack function to
+    intercept the return value from ValueBase.unpack if require extra
+    processing after being unpacked -- e.g. to do validation or to convert a
+    binary IP into a dotted quad."""
+
+    __metaclass__ = ValueMetaclass
+
+    def __init__(self, *args, **kwargs):
+        """The only expected keyword arg is 'raw'"""
+        if "raw" in kwargs:
+            for k, v in map(None, self.FIELDS, self.unpack(kwargs["raw"])):
                 setattr(self, k, v)
-        for k, v in kwargs.iteritems():
-            if k not in self.FIELDS:
-                raise(ValueError("Unknown attribute: %s" % k))
+        for k, v in map(None, self.FIELDS, args):
             setattr(self, k, v)
+        self._packed = None
 
     def pack(self):
-        return struct.pack(self.FORMAT,
-                           *[getattr(self, f) for f in self.FIELDS])
+        """Return the binary representation of this object."""
+        if not self._packed:
+            self._packed = struct.pack(self.FORMAT,
+                                   *[getattr(self, f) for f in self.FIELDS])
+        return self._packed
 
     def unpack(self, raw):
-        return struct.unpack(self.FORMAT, kwargs.values())
+        """Return a tuple containing the unpacked representation of this
+        object."""
+        return struct.unpack(self.FORMAT, raw)
+
+    def __setattr__(self, attr, val):
+        """Force a repack if an attribute was modified after the last pack."""
+        super(object, self).__thisclass__.__setattr__(self, "_packed", None)
+        super(object, self).__thisclass__.__setattr__(self, attr, val)
 
 
 class ValueNexthop(ValueBase):
-
     FIELDS = [ "ip" ]
     FORMAT = "I"
-    LEN = struct.calcsize(FORMAT)
 
     def unpack(self, raw):
         return ipaddr.IPv4Address(super(ValueBase, self).__thisclass__.unpack(self, raw))
 
 
-class TLVMetaclass(type):
-    """Metaclass for EIGRP TLVs. Handles merging base format and length with
-    TLV subclasses."""
-    def __init__(cls, name, bases, dct):
-        if hasattr(cls, "FORMAT"):
-            cls.FORMAT = cls.BASE_FORMAT + cls.FORMAT
-            cls.LEN = struct.calcsize(cls.FORMAT)
-        elif hasattr(cls, "BASE_FORMAT"):
-            cls.LEN = struct.calcsize(cls.BASE_FORMAT)
-        if hasattr(cls, "FIELDS"):
-            cls.FIELDS = cls.BASE_FIELDS + cls.FIELDS
-        elif hasattr(cls, "BASE_FIELDS"):
-            cls.FIELDS = cls.BASE_FIELDS
+class ValueClassicMetric(ValueBase):
+    FIELDS = [ "dly", "bw", "mtu", "hops", "rel", "load", "tag", "flags" ]
+    FORMAT = "II3sBBBBB"
+
+    def unpack(self, raw):
+        super(self, TLV).__thisclass__.unpack(self, raw)
+
+
+class ValueClassicDest(ValueBase):
+    FIELDS = [ ]
+
+
+class ValueParam(ValueBase):
+    FIELDS = [ "k1", "k2", "k3", "k4", "k5", "holdtime" ]
+    FORMAT = "HBBBBBxH"
 
 
 class TLV(object):
-    """Base class for EIGRP TLVs.
-    Stored values can be obtained using tlv.tlv["fieldname"] or
-    tlv["fieldname"] for short."""
-
-    __metaclass__ = TLVMetaclass
+    """Base class for EIGRP TLVs."""
 
     PROTO_GENERIC = 0
     PROTO_IP4     = 1
     PROTO_IP6     = 4
 
-    BASE_FIELDS = [ "proto", "type", "len" ]
-    BASE_FORMAT = ">BBH"
-    BASE_LEN    = struct.calcsize(BASE_FORMAT)
-
-    def __init__(self, raw="", **kwargs):
-        self.tlv = collections.OrderedDict()
-        for f in self.FIELDS:
-            self.tlv[f] = None
-        if raw: 
-            self.unpack(raw)
-        if kwargs:
-            for k, v in kwargs.iteritems():
-                self.tlv[k] = v
-        self.tlv["proto"] = self.PROTO
-        self.tlv["type"] = self.TYPE
-        self.tlv["len"] = self.LEN
+    def __init__(self, *args, **kwargs):
+        self.type = self.PROTO
+        self.len = self.TYPE
+        if "raw" in kwargs:
+            index = 0
+            # XXX We should call self.unpack() here, like ValueBase does.
+            # self.unpack should deal with passing values to other classes.
+            for valclass in self.VALUES:
+                setattr(self, valclass.NAME,
+                        valclass(raw=kwargs["raw"][index:index+valclass.LEN]))
+                index += valclass.LEN
+        index = 0
+        for valclass in self.VALUES:
+            nargs = len(valclass.FIELDS)
+            setattr(self, valclass.NAME, valclass(args[index:index+nargs]))
+            index += nargs
 
     def pack(self):
         return struct.pack(self.FORMAT, *(self.tlv.values()))
@@ -560,28 +590,16 @@ class TLV(object):
             self.tlv[attr] = value
 
 
-class ClassicMetric(TLV):
-    FIELDS = [ "dly", "bw", "mtu", "hops", "rel", "load", "tag", "flags" ]
-    FORMAT = "II3sBBBBB"
-    LEN    = struct.calcsize(FORMAT)
-
-    def unpack(self, raw):
-        super(self, TLV).__thisclass__.unpack(self, raw)
-        self.
-
-
 class TLVParam(TLV):
-    PROTO = TLV.PROTO_GENERIC
-    TYPE = 1
-    FIELDS = [ "k1", "k2", "k3", "k4", "k5", "holdtime" ]
-    FORMAT = "BBBBBxH"
+    PROTO  = TLV.PROTO_GENERIC
+    TYPE   = 1
+    VALUES = [ ValueParam ]
 
 
 class TLVInternalv4(TLV):
-    PROTO = TLV.PROTO_IP4
-    TYPE = 2
-    FIELDS = [ "nexthop" ] + ClassicMetric.FIELDS + ClassicDst.FIELDS
-    FORMAT = "I%s%s" % (ClassicMetric.FORMAT, ClassicDst.FORMAT)
+    PROTO  = TLV.PROTO_IP4
+    TYPE   = 2
+    VALUES = [ ValueNexthop, ValueClassicMetric, ValueClassicDest ]
 
 
 class RTPPacket(object):
