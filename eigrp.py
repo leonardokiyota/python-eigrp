@@ -32,6 +32,7 @@ from twisted.internet import protocol, base
 from twisted.python import log
 import ipaddr
 from heapq import heappush, heappop
+import collections
 
 import tw_baseiptransport
 from tw_baseiptransport import reactor
@@ -123,7 +124,7 @@ class EIGRP(protocol.DatagramProtocol):
         self._build_hello_pkt()
         for iface in requested_ifaces:
             self.activate_iface(iface)
-        self._fieldfactory = EIGRPFieldFactory()
+        self._fieldfactory = TLVFactory()
         self._neighbors = list()
         self._seq = 1
         self._crmode = False
@@ -161,12 +162,12 @@ class EIGRP(protocol.DatagramProtocol):
         hdr = self._rtphdr(opcode=self._rtphdr.OPC_HELLO, flags=0,
                            seq=0, ack=0, rid=self._rid,
                            asn=self._asn)
-        fields = EIGRPFieldParam(k1=self._k1,
-                                 k2=self._k2,
-                                 k3=self._k3,
-                                 k4=self._k4,
-                                 k5=self._k5,
-                                 holdtime=self._holdtime)
+        fields = TLVParam(k1=self._k1,
+                          k2=self._k2,
+                          k3=self._k3,
+                          k4=self._k4,
+                          k5=self._k5,
+                          holdtime=self._holdtime)
         self._hello_pkt = RTPPacket(hdr, fields).pack()
 
     def _send_periodic_hello(self):
@@ -206,20 +207,23 @@ class EIGRP(protocol.DatagramProtocol):
         self.log.debug("Processing REPLY")
 
     def _eigrp_op_handler_hello(self, addr, hdr, tlvs):
+        # XXX Handle a neighbor that changes k-values or holdtime while in
+        # PENDING or UP state
         self.log.debug("Processing HELLO")
         for tlv in tlvs:
             self.log.debug5(tlv)
-            if tlv.type == EIGRPFieldParam.TYPE:
-                if tlv.k1 != self._k1 or \
-                   tlv.k2 != self._k2 or \
-                   tlv.k3 != self._k3 or \
-                   tlv.k4 != self._k4 or \
-                   tlv.k5 != self._k5:
-                    self.log.debug("Parameter mismatch between potential neighbor at %s. Its kvalues were: %d %d %d %d %d" % (addr, tlv.k1, tlv.k2, tlv.k3, tlv.k4, tlv.k5))
+            if tlv["type"] == TLVParam.TYPE:
+                if tlv.tlv["k1"] != self._k1 or \
+                   tlv.tlv["k2"] != self._k2 or \
+                   tlv.tlv["k3"] != self._k3 or \
+                   tlv.tlv["k4"] != self._k4 or \
+                   tlv.tlv["k5"] != self._k5:
+                    self.log.debug("Parameter mismatch between potential "
+                                   "neighbor at %s." % (addr))
         neighbor = self._get_neighbor(addr)
         if not neighbor:
-            # XXX Get actual physical iface? Spec says I ought to
-            self._add_neighbor(addr, "IFACE", hdr.seq, tlv.holdtime)
+            # XXX Get actual incoming interface
+            self._add_neighbor(addr, "IFACE", hdr.seq, tlv.tlv["holdtime"])
             self.log.debug("New pending neighbor: %s" % addr)
         else:
             neighbor.last_heard = time.time()
@@ -386,16 +390,16 @@ class EIGRP(protocol.DatagramProtocol):
 
         self.log.debug("Processing datagram from %s" % addr)
         try:
-            hdr = self._rtphdr(data[:self._rtphdr.HEADERLEN])
+            hdr = self._rtphdr(data[:self._rtphdr.LEN])
         except struct.error:
-            bytes_to_print = self._rtphdr.HEADERLEN
+            bytes_to_print = self._rtphdr.LEN
             self.log.warn("Received malformed datagram from %s. Hexdump of "
                           "first %d bytes: %s" % (addr, bytes_to_print, \
                           binascii.hexlify(data[:bytes_to_print])))
             return
         observed_chksum = hdr.chksum
         hdr.chksum = 0
-        payload = data[self._rtphdr.HEADERLEN:]
+        payload = data[self._rtphdr.LEN:]
         real_chksum = RTPPacket.calc_chksum(hdr.pack() + payload)
         if real_chksum != observed_chksum:
             self.log.debug("Bad checksum: expected 0x%x, was 0x%x" % (addr, real_chksum, real_chksum))
@@ -437,7 +441,7 @@ class FormatException(EIGRPException):
         super(EIGRPException, self).__thisclass__.__init__(self, *args, **kwargs)
 
 
-class EIGRPFieldFactory(object):
+class TLVFactory(object):
     """Factory for EIGRP TLV fields."""
 
     def build_all(self, raw):
@@ -446,104 +450,138 @@ class EIGRPFieldFactory(object):
         rawlen = len(raw)
         while index < rawlen:
             tlv = self.build(raw[index:])
-            index += tlv.BASE_FORMATLEN + tlv.FORMATLEN
+            index += tlv.BASE_LEN + tlv.LEN
             yield tlv
 
     def build(self, raw):
         """Returns one TLV parsed from raw data."""
         try:
-            _proto, _type, _len = struct.unpack(EIGRPField.BASE_FORMAT,
-                                               raw[:EIGRPField.BASE_FORMATLEN])
-            if _type == EIGRPFieldParam.TYPE:
-                tlv = EIGRPFieldParam(raw=raw[:EIGRPFieldParam.FORMATLEN])
-            elif _type == EIGRPFieldAuth.TYPE:
-                tlv = EIGRPFieldAuth(raw=raw[:EIGRPFieldAuth.FORMATLEN])
-            elif _type == EIGRPFieldSeq.TYPE:
-                tlv = EIGRPFieldSeq(raw=raw[:EIGRPFieldSeq.FORMATLEN])
-            elif _type == EIGRPFieldSwVersion.TYPE:
-                tlv = EIGRPFieldSwVersion(raw=raw[:EIGRPFieldSwVersion.FORMATLEN])
-            elif _type == EIGRPFieldMulticastSeq.TYPE:
-                tlv = EIGRPFieldMulticastSeq(raw=raw[:EIGRPFieldMulticastSeq.FORMATLEN])
-            elif _type == EIGRPFieldPeerInfo.TYPE:
-                tlv = EIGRPFieldPeerInfo(raw=raw[:EIGRPFieldPeerInfo.FORMATLEN])
-            elif _type == EIGRPFieldPeerTerm.TYPE:
-                tlv = EIGRPFieldPeerTerm(raw=raw[:EIGRPFieldPeerTerm.FORMATLEN])
+            _proto, _type, _len = struct.unpack(TLV.BASE_FORMAT,
+                                               raw[:TLV.BASE_LEN])
+            if _type == TLVParam.TYPE:
+                return TLVParam(raw=raw[:TLVParam.LEN])
+            elif _type == TLVAuth.TYPE:
+                return TLVAuth(raw=raw[:TLVAuth.LEN])
+            elif _type == TLVSeq.TYPE:
+                return TLVSeq(raw=raw[:TLVSeq.LEN])
+            elif _type == TLVSwVersion.TYPE:
+                return TLVSwVersion(raw=raw[:TLVSwVersion.LEN])
+            elif _type == TLVMulticastSeq.TYPE:
+                return TLVMulticastSeq(raw=raw[:TLVMulticastSeq.LEN])
+            elif _type == TLVPeerInfo.TYPE:
+                return TLVPeerInfo(raw=raw[:TLVPeerInfo.LEN])
+            elif _type == TLVPeerTerm.TYPE:
+                return TLVPeerTerm(raw=raw[:TLVPeerTerm.LEN])
             else:
                 raise(ValueError("Unknown type in TLV: %d" % _type))
         except struct.error:
             raise
-            raise(FormatException("Unpacking failed (malformed TLV?)."))
-        tlv.proto = _proto
-        tlv.type = _type
-        tlv.len = _len
-        return tlv
+            #raise(FormatException("Unpacking failed (malformed TLV?)."))
 
 
-class EIGRPField(object):
-    """Base class for EIGRP Fields (TLVs)."""
+class ValueBase(object):
+    """Base class for the "value" section of a TLV."""
+    def __init__(self, raw="", **kwargs):
+        if raw:
+            for k, v in map(None, self.FIELDS, self.unpack(raw)):
+                setattr(self, k, v)
+        for k, v in kwargs.iteritems():
+            if k not in self.FIELDS:
+                raise(ValueError("Unknown attribute: %s" % k))
+            setattr(self, k, v)
+
+    def pack(self):
+        return struct.pack(self.FORMAT,
+                           *[getattr(self, f) for f in self.FIELDS])
+
+    def unpack(self, raw):
+        return struct.unpack(self.FORMAT, kwargs.values())
+
+
+class ValueNexthop(ValueBase):
+
+    FIELDS = [ "ip" ]
+    FORMAT = "I"
+    LEN = struct.calcsize(FORMAT)
+
+    def unpack(self, raw):
+        return ipaddr.IPv4Address(super(ValueBase, self).__thisclass__.unpack(self, raw))
+
+
+class TLVMetaclass(type):
+    """Metaclass for EIGRP TLVs. Handles merging base format and length with
+    TLV subclasses."""
+    def __init__(cls, name, bases, dct):
+        if hasattr(cls, "FORMAT"):
+            cls.FORMAT = cls.BASE_FORMAT + cls.FORMAT
+            cls.LEN = struct.calcsize(cls.FORMAT)
+        elif hasattr(cls, "BASE_FORMAT"):
+            cls.LEN = struct.calcsize(cls.BASE_FORMAT)
+        if hasattr(cls, "FIELDS"):
+            cls.FIELDS = cls.BASE_FIELDS + cls.FIELDS
+        elif hasattr(cls, "BASE_FIELDS"):
+            cls.FIELDS = cls.BASE_FIELDS
+
+
+class TLV(object):
+    """Base class for EIGRP TLVs.
+    Stored values can be obtained using tlv.tlv["fieldname"] or
+    tlv["fieldname"] for short."""
+
+    __metaclass__ = TLVMetaclass
 
     PROTO_GENERIC = 0
     PROTO_IP4     = 1
     PROTO_IP6     = 4
 
-    BASE_FORMAT    = ">BBH"
-    BASE_FORMATLEN = struct.calcsize(BASE_FORMAT)
+    BASE_FIELDS = [ "proto", "type", "len" ]
+    BASE_FORMAT = ">BBH"
+    BASE_LEN    = struct.calcsize(BASE_FORMAT)
 
-    def __init__(self, proto=None):
-        if proto == None:
-            proto = self.PROTO_GENERIC
-        if proto != self.PROTO_GENERIC:
-            raise(ValueError("Only PROTO_GENERIC is supported."))
-        self.proto = proto
-
-    def _pack(self, *args):
-        return struct.pack(self.FORMAT, self.proto, self.type, self.len, *args)
-
-
-class EIGRPFieldParam(EIGRPField):
-    """Parameter type TLV"""
-
-    TYPE = 1
-
-    FORMAT = EIGRPField.BASE_FORMAT + "BBBBBxH"
-    FORMATLEN = struct.calcsize(FORMAT)
-
-    def __init__(self, raw=None, k1=None, k2=None, k3=None, k4=None, k5=None,
-                 holdtime=None, *args, **kwargs):
-        super(EIGRPField, self).__thisclass__.__init__(self, *args, **kwargs)
-        if raw and \
-           not (k1 != None or \
-                k2 != None or \
-                k3 != None or \
-                k4 != None or \
-                k5 != None or \
-                holdtime):
-            self.proto, self.type, self.len, self.k1, self.k2, self.k3, self.k4, \
-                        self.k5, self.holdtime = self.unpack(raw)
-        elif not raw and \
-             (k1 != None and \
-              k2 != None and \
-              k3 != None and \
-              k4 != None and \
-              k5 != None and \
-              holdtime):
-            self.k1 = k1
-            self.k2 = k2
-            self.k3 = k3
-            self.k4 = k4
-            self.k5 = k5
-            self.holdtime = holdtime
-            self.type = self.TYPE
-            self.len = self.FORMATLEN
-        else:
-            raise(ValueError("Either raw or all other values are required, not"
-                             " both."))
+    def __init__(self, raw="", **kwargs):
+        self.tlv = collections.OrderedDict()
+        for f in self.FIELDS:
+            self.tlv[f] = None
+        if raw: 
+            self.unpack(raw)
+        if kwargs:
+            for k, v in kwargs.iteritems():
+                self.tlv[k] = v
+        self.tlv["proto"] = self.PROTO
+        self.tlv["type"] = self.TYPE
+        self.tlv["len"] = self.LEN
 
     def pack(self):
-        return self._pack(self.k1, self.k2, self.k3, self.k4, self.k5, self.holdtime)
+        return struct.pack(self.FORMAT, *(self.tlv.values()))
 
     def unpack(self, raw):
-        return struct.unpack(self.FORMAT, raw)
+        for (attr, value) in map(None, self.FIELDS, \
+                                 struct.unpack(self.FORMAT, raw)):
+            self.tlv[attr] = value
+
+
+class ClassicMetric(TLV):
+    FIELDS = [ "dly", "bw", "mtu", "hops", "rel", "load", "tag", "flags" ]
+    FORMAT = "II3sBBBBB"
+    LEN    = struct.calcsize(FORMAT)
+
+    def unpack(self, raw):
+        super(self, TLV).__thisclass__.unpack(self, raw)
+        self.
+
+
+class TLVParam(TLV):
+    PROTO = TLV.PROTO_GENERIC
+    TYPE = 1
+    FIELDS = [ "k1", "k2", "k3", "k4", "k5", "holdtime" ]
+    FORMAT = "BBBBBxH"
+
+
+class TLVInternalv4(TLV):
+    PROTO = TLV.PROTO_IP4
+    TYPE = 2
+    FIELDS = [ "nexthop" ] + ClassicMetric.FIELDS + ClassicDst.FIELDS
+    FORMAT = "I%s%s" % (ClassicMetric.FORMAT, ClassicDst.FORMAT)
 
 
 class RTPPacket(object):
@@ -560,6 +598,7 @@ class RTPPacket(object):
         self.hdr.chksum = 0
         prehdr = self.hdr.pack()
         fields = ""
+        print self.fields
         for f in self.fields:
             fields += f.pack()
         self.hdr.chksum = self.calc_chksum(prehdr + fields)
@@ -591,8 +630,8 @@ class RTPHeader2(object):
     """Reliable Transport Protocol Header (header version 2)."""
 
     FORMAT = ">BBHIIIHH"
-    HEADERLEN = struct.calcsize(FORMAT)
-    VER = 2
+    LEN    = struct.calcsize(FORMAT)
+    VER    = 2
 
     OPC_UPDATE   = 1
     OPC_REQUEST  = 2

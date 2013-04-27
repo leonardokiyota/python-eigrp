@@ -65,8 +65,8 @@ class ReactorWithIPTransport(reactor_class):
 reactor = ReactorWithIPTransport()
 installReactor(reactor)
 
-# Open for suggestions on a name other than IPTransport. The other examples
-# I had were UDPPort and TCPPort -- clearly IPPort isn't a better option.
+# Open for suggestions on a name other than IPTransport. Other similar classes
+# in Twisted are UDPPort and TCPPort -- clearly IPPort isn't a better option.
 # Maybe IPSocket?
 class IPTransport(udp.MulticastPort):
     """Provides IP services for layer 4 transport protocols, including
@@ -113,6 +113,12 @@ class IPTransport(udp.MulticastPort):
                 try:
                     # Strip IP header (including IP options) before passing to
                     # transport protocol.
+                    # Possibly all of the validation done here is also done
+                    # by the kernel. If that is true for raw sockets on all
+                    # OSes that Twisted supports (Windows, Linux, Mac OS X,
+                    # FreeBSD), then perhaps these checks could be taken out.
+                    # If not, there are other validation checks that can be
+                    # performed here.
                     if len(data) < 1:
                         log.msg("Received invalid packet with data length less than 1 from host %s." % addr[0])
                         continue
