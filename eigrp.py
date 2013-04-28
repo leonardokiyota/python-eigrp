@@ -32,7 +32,6 @@ from twisted.internet import protocol, base
 from twisted.python import log
 import ipaddr
 from heapq import heappush, heappop
-import collections
 
 import tw_baseiptransport
 from tw_baseiptransport import reactor
@@ -501,7 +500,7 @@ class ValueBase(object):
     Derived classes may also have to override the unpack function to
     intercept the return value from ValueBase.unpack if require extra
     processing after being unpacked -- e.g. to do validation or to convert a
-    binary IP into a dotted quad."""
+    binary IP into a dotted quad. Same for pack."""
 
     __metaclass__ = ValueMetaclass
 
@@ -523,7 +522,7 @@ class ValueBase(object):
 
     def unpack(self, raw):
         """Return a tuple containing the unpacked representation of this
-        object."""
+        object. Return values correspond to self.FIELDS."""
         return struct.unpack(self.FORMAT, raw)
 
     def __setattr__(self, attr, val):
@@ -531,13 +530,27 @@ class ValueBase(object):
         super(object, self).__thisclass__.__setattr__(self, "_packed", None)
         super(object, self).__thisclass__.__setattr__(self, attr, val)
 
+    def __repr__(self):
+        """Example output: ValueClassicDest: [mask: 10, addr: 11]"""
+        s = type(self).__name__ + ": ["
+        for f in self.FIELDS:
+            s += f + ": " + str(getattr(self, f)) + ", "
+        s = s.rstrip(", ")
+        s += "]"
+        return s
+
 
 class ValueNexthop(ValueBase):
     FIELDS = [ "ip" ]
     FORMAT = "I"
 
     def unpack(self, raw):
-        return ipaddr.IPv4Address(super(ValueBase, self).__thisclass__.unpack(self, raw))
+        return ipaddr.IPv4Address(super(ValueBase,
+                                        self).__thisclass__.unpack(self, raw))
+
+    def unpack(self, raw):
+        return ipaddr.IPv4Address(super(ValueBase,
+                               self).__thisclass__.unpack(self, raw)).packed
 
 
 class ValueClassicMetric(ValueBase):
@@ -545,11 +558,27 @@ class ValueClassicMetric(ValueBase):
     FORMAT = "II3sBBBBB"
 
     def unpack(self, raw):
+        # XXX get mtu
         super(self, TLV).__thisclass__.unpack(self, raw)
 
 
 class ValueClassicDest(ValueBase):
-    FIELDS = [ ]
+    # Classic destination encoding uses a variable length field for the
+    # destination address, so there is more work that needs to be done in
+    # the subclass.
+    FIELDS = [ "mask", "addr" ]
+    FORMAT = "B4s"
+    #ORIG_FORMAT = 
+
+    def unpack(self, raw):
+        # XXX get addr
+        super(self, TLV).__thisclass__.unpack(self, raw)
+
+    def pack(self, raw):
+        # XXX set the variable length address, update len. Len needs to be
+        # updated because other classes check this to know how much data
+        # to push in later.
+        super(self, TLV).__thisclass__.unpack(self, raw)
 
 
 class ValueParam(ValueBase):
@@ -565,29 +594,44 @@ class TLV(object):
     PROTO_IP6     = 4
 
     def __init__(self, *args, **kwargs):
+        """There is only one used kwarg: "raw".
+        args should be all required arguments for the TLV's Value members.
+        """
         self.type = self.PROTO
         self.len = self.TYPE
         if "raw" in kwargs:
-            index = 0
-            # XXX We should call self.unpack() here, like ValueBase does.
-            # self.unpack should deal with passing values to other classes.
-            for valclass in self.VALUES:
-                setattr(self, valclass.NAME,
-                        valclass(raw=kwargs["raw"][index:index+valclass.LEN]))
-                index += valclass.LEN
+            for valclass, instance in map(None, self.VALUES, \
+                                       self.unpack(kwargs["raw"])):
+                setattr(self, valclass.NAME, instance)
         index = 0
         for valclass in self.VALUES:
             nargs = len(valclass.FIELDS)
-            setattr(self, valclass.NAME, valclass(args[index:index+nargs]))
+            setattr(self, valclass.NAME, valclass(*args[index:index+nargs]))
             index += nargs
 
+    def __repr__(self):
+        s = type(self).__name__ + ": ["
+        for v in self.VALUES:
+            s += str(getattr(self, v.NAME)) + ", "
+        s = s.rstrip(", ") 
+        s += "]"
+        return s
+
     def pack(self):
-        return struct.pack(self.FORMAT, *(self.tlv.values()))
+        packed = ""
+        for valclass in self.VALUES:
+            valobj = getattr(self, valclass.NAME)
+            packed += valobj.pack()
+        return packed
 
     def unpack(self, raw):
-        for (attr, value) in map(None, self.FIELDS, \
-                                 struct.unpack(self.FORMAT, raw)):
-            self.tlv[attr] = value
+        index = 0
+        objs = tuple()
+        for valclass in self.VALUES:
+            valobj = getattr(self, value.NAME)
+            objs.append(valobj(raw=raw[index:index+valclass.LEN]))
+            index += valclass.LEN
+        return objs
 
 
 class TLVParam(TLV):
@@ -616,7 +660,6 @@ class RTPPacket(object):
         self.hdr.chksum = 0
         prehdr = self.hdr.pack()
         fields = ""
-        print self.fields
         for f in self.fields:
             fields += f.pack()
         self.hdr.chksum = self.calc_chksum(prehdr + fields)
