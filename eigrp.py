@@ -161,12 +161,12 @@ class EIGRP(protocol.DatagramProtocol):
         hdr = self._rtphdr(opcode=self._rtphdr.OPC_HELLO, flags=0,
                            seq=0, ack=0, rid=self._rid,
                            asn=self._asn)
-        fields = TLVParam(k1=self._k1,
-                          k2=self._k2,
-                          k3=self._k3,
-                          k4=self._k4,
-                          k5=self._k5,
-                          holdtime=self._holdtime)
+        fields = TLVParam(self._k1,
+                          self._k2,
+                          self._k3,
+                          self._k4,
+                          self._k5,
+                          self._holdtime)
         self._hello_pkt = RTPPacket(hdr, fields).pack()
 
     def _send_periodic_hello(self):
@@ -177,6 +177,7 @@ class EIGRP(protocol.DatagramProtocol):
         reactor.callLater(self._hello_interval, self._send_periodic_hello)
 
     def _write(self, msg, dst, src=None):
+        # XXX Enforce 4 byte alignment in some higher function
         self.log.debug5("Writing packet to %s, iface %s." % (dst, \
                         src or "unspecified"))
         if src:
@@ -480,11 +481,13 @@ class TLVFactory(object):
 
 class ValueMetaclass(type):
     """Metaclass for values in the TLV.
-    Calculates the format length (LEN) and assigns a brief NAME attribute
+    Assigns big-endian byte ordering to the format string, calculates the
+    format length (LEN), and assigns a brief NAME attribute
     based on the class name."""
     def __init__(cls, name, bases, dct):
         super(type, cls).__thisclass__.__init__(cls, name, bases, dct)
         if hasattr(cls, "FORMAT"):
+            cls.FORMAT = ">" + cls.FORMAT
             cls.LEN = struct.calcsize(cls.FORMAT)
         cls.NAME = name.lstrip("Value").lstrip("Classic").lower()
 
@@ -492,22 +495,23 @@ class ValueMetaclass(type):
 class ValueBase(object):
     """Base class for the "value" section of a TLV.
 
-    Derived classes should have FIELDS, FORMAT, and LEN class attributes.
+    Derived classes should have FIELDS, FORMAT, and LEN class attributes if
+    they want to use ValueBase's generic pack/unpack functions.
     FIELDS should be a list of strings describing the fields within the value.
     FORMAT is the format to be used with struct.pack/unpack.
-    LEN is the return value of struct.calcsize called on FORMAT.
+    LEN is the return value of struct.calcsize(FORMAT).
 
-    Derived classes may also have to override the unpack function to
-    intercept the return value from ValueBase.unpack if require extra
-    processing after being unpacked -- e.g. to do validation or to convert a
-    binary IP into a dotted quad. Same for pack."""
+    Derived classes may also have to override the (un)pack functions if they
+    have non-scalar fields or fields that require extra processing after
+    pack/unpack is called. For example, to do validation or convert a
+    binary IP into a dotted quad."""
 
     __metaclass__ = ValueMetaclass
 
     def __init__(self, *args, **kwargs):
         """The only expected keyword arg is 'raw'"""
         if "raw" in kwargs:
-            for k, v in map(None, self.FIELDS, self.unpack(kwargs["raw"])):
+            for k, v in map(None, self.getfields(), self.unpack(kwargs["raw"])):
                 setattr(self, k, v)
         for k, v in map(None, self.FIELDS, args):
             setattr(self, k, v)
@@ -517,13 +521,23 @@ class ValueBase(object):
         """Return the binary representation of this object."""
         if not self._packed:
             self._packed = struct.pack(self.FORMAT,
-                                   *[getattr(self, f) for f in self.FIELDS])
+                               *[getattr(self, f) for f in self.getfields()])
+        print self
+        for x in self._packed:
+            print ord(x),
+        print
         return self._packed
 
     def unpack(self, raw):
         """Return a tuple containing the unpacked representation of this
         object. Return values correspond to self.FIELDS."""
         return struct.unpack(self.FORMAT, raw)
+
+    def getfields(self):
+        return self.FIELDS
+
+    def getlen(self, raw):
+        return self.LEN
 
     def __setattr__(self, attr, val):
         """Force a repack if an attribute was modified after the last pack."""
@@ -544,46 +558,137 @@ class ValueNexthop(ValueBase):
     FIELDS = [ "ip" ]
     FORMAT = "I"
 
-    def unpack(self, raw):
-        return ipaddr.IPv4Address(super(ValueBase,
-                                        self).__thisclass__.unpack(self, raw))
+    def __init__(self, *args, **kwargs):
+        if kwargs:
+            for k, v in map(None, self.FIELDS, self.unpack(kwargs["raw"])):
+                setattr(self, k, v)
+        if args:
+            self.ip = ipaddr.IPv4Address(args[0])
 
     def unpack(self, raw):
-        return ipaddr.IPv4Address(super(ValueBase,
-                               self).__thisclass__.unpack(self, raw)).packed
+        return [ipaddr.IPv4Address(super(ValueBase,
+                                     self).__thisclass__.unpack(self, raw)[0])]
+
+    def pack(self):
+        if not self._packed:
+            self._packed = self.ip.packed
+        return self._packed
 
 
 class ValueClassicMetric(ValueBase):
+    # Note: mtu is split into 2 high bytes and 1 low byte.
     FIELDS = [ "dly", "bw", "mtu", "hops", "rel", "load", "tag", "flags" ]
-    FORMAT = "II3sBBBBB"
+    _PRIVFIELDS = [ "dly", "bw", "mtuhigh", "mtulow", "hops", "rel", "load",
+                    "tag", "flags" ]
+    FORMAT = "IIHBBBBBB"
+
+    def __init__(self, *args, **kwargs):
+        self._mtulow = 0
+        self._mtuhigh = 0
+
+        if "raw" in kwargs:
+            for k, v in map(None, self.FIELDS,
+                            self.unpack(kwargs["raw"])):
+                setattr(self, k, v)
+        for k, v in map(None, self.FIELDS, args):
+            setattr(self, k, v)
+        self._packed = None
+
+    def getfields(self):
+        return self._PRIVFIELDS
+
+    @property
+    def mtuhigh(self):
+        return self._mtuhigh
+
+    @mtuhigh.setter
+    def mtuhigh(self, val):
+        self._mtuhigh = val
+        self._mtu = self._calc_mtu(self._mtuhigh, self._mtulow)
+
+    @property
+    def mtulow(self):
+        return self._mtulow
+
+    @mtulow.setter
+    def mtulow(self, val):
+        self._mtulow = val
+        self._mtu = self._calc_mtu(self._mtuhigh, self._mtulow)
+
+    @property
+    def mtu(self):
+        return self._mtu
+
+    @mtu.setter
+    def mtu(self, val):
+        self._mtu = val
+        if self._mtu:
+            self._mtuhigh, self._mtulow = divmod(self._mtu, 0x10000)
+
+    @staticmethod
+    def _calc_mtu(high, low):
+        """Add the 2 high bytes and 1 low byte to get the actual mtu."""
+        return low + (high << 8)
 
     def unpack(self, raw):
-        # XXX get mtu
-        super(self, TLV).__thisclass__.unpack(self, raw)
+        """Find the two-value mtu (split into high and low bytes) and
+        replace them with a single value mtu."""
+        unpacked = super(ValueBase, self).__thisclass__.unpack(self, raw)
+        mtuhigh_index = self.FIELDS.index("mtu")
+        mtuhigh = unpacked[mtuhigh_index]
+        mtulow = unpacked[mtuhigh_index+1]
+        mtu = self._calc_mtu(mtuhigh, mtulow)
+        return unpacked[:mtuhigh_index] + tuple([mtu]) + \
+               unpacked[mtuhigh_index+2:]
 
 
 class ValueClassicDest(ValueBase):
-    # Classic destination encoding uses a variable length field for the
-    # destination address, so there is more work that needs to be done in
-    # the subclass.
-    FIELDS = [ "mask", "addr" ]
-    FORMAT = "B4s"
-    #ORIG_FORMAT = 
+    # FORMAT is set only during the unpack call because the address is a
+    # variable length field.
+    FIELDS = [ "plen", "addr" ]
+
+    def __init__(self, *args, **kwargs):
+        super(ValueBase, self).__thisclass__.__init__(self, *args, **kwargs)
+        if args:
+            self.addr = ipaddr.IPv4Address(self.addr)
 
     def unpack(self, raw):
-        # XXX get addr
-        super(self, TLV).__thisclass__.unpack(self, raw)
+        # Unpack and convert addr into an ipaddr.IPv4Address. Subtract one
+        # from getlen because we don't want to include the prefix length.
+        self.FORMAT = "B%ds" % (self.getlen(raw) - 1)
+        self.LEN = struct.calcsize(self.FORMAT)
+        plen, addr = super(ValueBase, self).__thisclass__.unpack(self, raw)
+        self.FORMAT = None
+        self.LEN = None
+        return plen, ipaddr.IPv4Address(ipaddr.Bytes(addr.ljust(4, "\x00")))
 
-    def pack(self, raw):
-        # XXX set the variable length address, update len. Len needs to be
-        # updated because other classes check this to know how much data
-        # to push in later.
-        super(self, TLV).__thisclass__.unpack(self, raw)
+    def pack(self):
+        if not self._packed:
+            self._packed = struct.pack("B", self.plen) + \
+                           self.addr.packed[:self._getaddrpacklen(self.plen)]
+        return self._packed
+
+    def getlen(self, raw):
+        if not raw:
+            raise(ValueError("Raw cannot be empty."))
+        try:
+            plen = struct.unpack("B", raw[0])[0]
+        except struct.error:
+            raise(ValueError("Plen argument must be an integer."))
+        if not (0 <= plen <= 32):
+            raise(ValueError("Plen must be between 0 and 32."))
+        # +1 is for the prefix length
+        return self._getaddrpacklen(plen) + 1
+
+    @staticmethod
+    def _getaddrpacklen(plen):
+        # See A.8.4 of the draft RFC.
+        return ((plen - 1) / 8 + 1)
 
 
 class ValueParam(ValueBase):
     FIELDS = [ "k1", "k2", "k3", "k4", "k5", "holdtime" ]
-    FORMAT = "HBBBBBxH"
+    FORMAT = "BBBBBxH"
 
 
 class TLV(object):
@@ -593,12 +698,15 @@ class TLV(object):
     PROTO_IP4     = 1
     PROTO_IP6     = 4
 
+    HDR_FORMAT = ">BBH"
+    HDR_LEN = struct.calcsize(HDR_FORMAT)
+
     def __init__(self, *args, **kwargs):
         """There is only one used kwarg: "raw".
         args should be all required arguments for the TLV's Value members.
         """
-        self.type = self.PROTO
-        self.len = self.TYPE
+        self.proto = self.PROTO
+        self.type = self.TYPE
         if "raw" in kwargs:
             for valclass, instance in map(None, self.VALUES, \
                                        self.unpack(kwargs["raw"])):
@@ -620,18 +728,35 @@ class TLV(object):
     def pack(self):
         packed = ""
         for valclass in self.VALUES:
-            valobj = getattr(self, valclass.NAME)
-            packed += valobj.pack()
-        return packed
+            packed += getattr(self, valclass.NAME).pack()
+        padlen = self.getpad(len(packed))
+        self.len = self.HDR_LEN + len(packed) + padlen
+        hdr = self.packhdr()
+        packed = hdr + packed
+        return packed + ("\x00" * padlen)
+
+    def packhdr(self):
+        return struct.pack(self.HDR_FORMAT, self.proto, self.type, self.len)
 
     def unpack(self, raw):
         index = 0
-        objs = tuple()
+        objs = list()
         for valclass in self.VALUES:
-            valobj = getattr(self, value.NAME)
-            objs.append(valobj(raw=raw[index:index+valclass.LEN]))
-            index += valclass.LEN
+            valobj = valclass()
+            rawlen = valobj.getlen(raw[index:])
+            objs.append(valclass(raw=raw[index:index+rawlen]))
+            index += rawlen
+        # Check for 4 byte alignment
+        pad = self.getpad(index)
+        if index + pad != len(raw):
+            raise(ValueError("Raw data was not padded to 4 bytes, or" 
+                             "garbage follows the data."))
         return objs
+
+    @staticmethod
+    def getpad(datalen, alignment=4):
+        """Returns length needed to pad to the specified byte alignment."""
+        return (alignment - (datalen % alignment)) % alignment
 
 
 class TLVParam(TLV):
