@@ -177,7 +177,6 @@ class EIGRP(protocol.DatagramProtocol):
         reactor.callLater(self._hello_interval, self._send_periodic_hello)
 
     def _write(self, msg, dst, src=None):
-        # XXX Enforce 4 byte alignment in some higher function
         self.log.debug5("Writing packet to %s, iface %s." % (dst, \
                         src or "unspecified"))
         if src:
@@ -212,18 +211,18 @@ class EIGRP(protocol.DatagramProtocol):
         self.log.debug("Processing HELLO")
         for tlv in tlvs:
             self.log.debug5(tlv)
-            if tlv["type"] == TLVParam.TYPE:
-                if tlv.tlv["k1"] != self._k1 or \
-                   tlv.tlv["k2"] != self._k2 or \
-                   tlv.tlv["k3"] != self._k3 or \
-                   tlv.tlv["k4"] != self._k4 or \
-                   tlv.tlv["k5"] != self._k5:
+            if tlv.type == TLVParam.TYPE:
+                if tlv.param.k1 != self._k1 or \
+                   tlv.param.k2 != self._k2 or \
+                   tlv.param.k3 != self._k3 or \
+                   tlv.param.k4 != self._k4 or \
+                   tlv.param.k5 != self._k5:
                     self.log.debug("Parameter mismatch between potential "
                                    "neighbor at %s." % (addr))
         neighbor = self._get_neighbor(addr)
         if not neighbor:
             # XXX Get actual incoming interface
-            self._add_neighbor(addr, "IFACE", hdr.seq, tlv.tlv["holdtime"])
+            self._add_neighbor(addr, "IFACE", hdr.seq, tlv.param.holdtime)
             self.log.debug("New pending neighbor: %s" % addr)
         else:
             neighbor.last_heard = time.time()
@@ -450,33 +449,38 @@ class TLVFactory(object):
         rawlen = len(raw)
         while index < rawlen:
             tlv = self.build(raw[index:])
-            index += tlv.BASE_LEN + tlv.LEN
+            index += tlv.getlen()
             yield tlv
 
     def build(self, raw):
         """Returns one TLV parsed from raw data."""
         try:
-            _proto, _type, _len = struct.unpack(TLV.BASE_FORMAT,
-                                               raw[:TLV.BASE_LEN])
+            _type, _len = self.unpack_hdr(raw)
             if _type == TLVParam.TYPE:
-                return TLVParam(raw=raw[:TLVParam.LEN])
+                return TLVParam(raw=raw)
             elif _type == TLVAuth.TYPE:
-                return TLVAuth(raw=raw[:TLVAuth.LEN])
+                return TLVAuth(raw=raw)
             elif _type == TLVSeq.TYPE:
                 return TLVSeq(raw=raw[:TLVSeq.LEN])
-            elif _type == TLVSwVersion.TYPE:
-                return TLVSwVersion(raw=raw[:TLVSwVersion.LEN])
+            elif _type == TLVVersion.TYPE:
+                return TLVVersion(raw=raw[:TLVVersion.LEN])
             elif _type == TLVMulticastSeq.TYPE:
                 return TLVMulticastSeq(raw=raw[:TLVMulticastSeq.LEN])
             elif _type == TLVPeerInfo.TYPE:
                 return TLVPeerInfo(raw=raw[:TLVPeerInfo.LEN])
             elif _type == TLVPeerTerm.TYPE:
                 return TLVPeerTerm(raw=raw[:TLVPeerTerm.LEN])
+            elif _type == TLVPeerTIDList.TYPE:
+                return TLVPeerTerm(raw=raw[:TLVPeerTerm.LEN])
             else:
                 raise(ValueError("Unknown type in TLV: %d" % _type))
         except struct.error:
             raise
             #raise(FormatException("Unpacking failed (malformed TLV?)."))
+
+    @staticmethod
+    def unpack_hdr(raw):
+        return struct.unpack(TLVBase.HDR_FORMAT, raw[:TLVBase.HDR_LEN])
 
 
 class ValueMetaclass(type):
@@ -510,34 +514,41 @@ class ValueBase(object):
 
     def __init__(self, *args, **kwargs):
         """The only expected keyword arg is 'raw'"""
+        if kwargs and args:
+            raise(ValueError("Either args or kwargs are expected, not both."))
         if "raw" in kwargs:
-            for k, v in map(None, self.getfields(), self.unpack(kwargs["raw"])):
+            for k, v in map(None, self._get_public_fields(),
+                            self.unpack(kwargs["raw"])):
                 setattr(self, k, v)
-        for k, v in map(None, self.FIELDS, args):
-            setattr(self, k, v)
+        elif args:
+            for k, v in map(None, self.FIELDS, args):
+                setattr(self, k, v)
+        else:
+            raise(ValueError("One of args or kwargs is expected."))
         self._packed = None
+
+    def _get_public_fields(self):
+        return self.FIELDS
+
+    def _get_private_fields(self):
+        """Get private class fields. Override in subclass if this should
+        return something besides the regular self.FIELDS."""
+        return self.FIELDS
+
+    def getlen(self):
+        return self.LEN
 
     def pack(self):
         """Return the binary representation of this object."""
         if not self._packed:
             self._packed = struct.pack(self.FORMAT,
-                               *[getattr(self, f) for f in self.getfields()])
-        print self
-        for x in self._packed:
-            print ord(x),
-        print
+                       *[getattr(self, f) for f in self._get_private_fields()])
         return self._packed
 
     def unpack(self, raw):
         """Return a tuple containing the unpacked representation of this
         object. Return values correspond to self.FIELDS."""
-        return struct.unpack(self.FORMAT, raw)
-
-    def getfields(self):
-        return self.FIELDS
-
-    def getlen(self, raw):
-        return self.LEN
+        return struct.unpack(self.FORMAT, raw[:self.getlen()])
 
     def __setattr__(self, attr, val):
         """Force a repack if an attribute was modified after the last pack."""
@@ -545,12 +556,11 @@ class ValueBase(object):
         super(object, self).__thisclass__.__setattr__(self, attr, val)
 
     def __repr__(self):
-        """Example output: ValueClassicDest: [mask: 10, addr: 11]"""
-        s = type(self).__name__ + ": ["
+        s = type(self).__name__ + "("
         for f in self.FIELDS:
-            s += f + ": " + str(getattr(self, f)) + ", "
+            s += f + "=" + str(getattr(self, f)) + ", "
         s = s.rstrip(", ")
-        s += "]"
+        s += ")"
         return s
 
 
@@ -559,11 +569,9 @@ class ValueNexthop(ValueBase):
     FORMAT = "I"
 
     def __init__(self, *args, **kwargs):
-        if kwargs:
-            for k, v in map(None, self.FIELDS, self.unpack(kwargs["raw"])):
-                setattr(self, k, v)
+        super(ValueBase, self).__thisclass__.__init__(self, *args, **kwargs)
         if args:
-            self.ip = ipaddr.IPv4Address(args[0])
+            self.ip = ipaddr.IPv4Address(self.ip)
 
     def unpack(self, raw):
         return [ipaddr.IPv4Address(super(ValueBase,
@@ -585,16 +593,9 @@ class ValueClassicMetric(ValueBase):
     def __init__(self, *args, **kwargs):
         self._mtulow = 0
         self._mtuhigh = 0
+        super(ValueBase, self).__thisclass__.__init__(self, *args, **kwargs)
 
-        if "raw" in kwargs:
-            for k, v in map(None, self.FIELDS,
-                            self.unpack(kwargs["raw"])):
-                setattr(self, k, v)
-        for k, v in map(None, self.FIELDS, args):
-            setattr(self, k, v)
-        self._packed = None
-
-    def getfields(self):
+    def _get_private_fields(self):
         return self._PRIVFIELDS
 
     @property
@@ -643,23 +644,23 @@ class ValueClassicMetric(ValueBase):
 
 
 class ValueClassicDest(ValueBase):
-    # FORMAT is set only during the unpack call because the address is a
-    # variable length field.
+    # FORMAT and LEN are only set after init or unpacking because addr is a
+    # variable length depending on what is being unpacked.
     FIELDS = [ "plen", "addr" ]
 
     def __init__(self, *args, **kwargs):
         super(ValueBase, self).__thisclass__.__init__(self, *args, **kwargs)
         if args:
             self.addr = ipaddr.IPv4Address(self.addr)
+            self._setformat(plen)
+
+    def _setformat(self, plen):
+        self.FORMAT = "B%ds" % self._getaddrpacklen(plen)
+        self.LEN = struct.calcsize(self.FORMAT)
 
     def unpack(self, raw):
-        # Unpack and convert addr into an ipaddr.IPv4Address. Subtract one
-        # from getlen because we don't want to include the prefix length.
-        self.FORMAT = "B%ds" % (self.getlen(raw) - 1)
-        self.LEN = struct.calcsize(self.FORMAT)
         plen, addr = super(ValueBase, self).__thisclass__.unpack(self, raw)
-        self.FORMAT = None
-        self.LEN = None
+        self._setformat(plen)
         return plen, ipaddr.IPv4Address(ipaddr.Bytes(addr.ljust(4, "\x00")))
 
     def pack(self):
@@ -668,7 +669,7 @@ class ValueClassicDest(ValueBase):
                            self.addr.packed[:self._getaddrpacklen(self.plen)]
         return self._packed
 
-    def getlen(self, raw):
+    def _getpacklen(self, raw):
         if not raw:
             raise(ValueError("Raw cannot be empty."))
         try:
@@ -691,38 +692,49 @@ class ValueParam(ValueBase):
     FORMAT = "BBBBBxH"
 
 
-class TLV(object):
+class TLVBase(object):
     """Base class for EIGRP TLVs."""
 
     PROTO_GENERIC = 0
-    PROTO_IP4     = 1
-    PROTO_IP6     = 4
+    PROTO_IP4     = 0x100
+    PROTO_IP6     = 0x400
 
-    HDR_FORMAT = ">BBH"
+    HDR_FORMAT = ">HH"
     HDR_LEN = struct.calcsize(HDR_FORMAT)
 
     def __init__(self, *args, **kwargs):
         """There is only one used kwarg: "raw".
         args should be all required arguments for the TLV's Value members.
         """
-        self.proto = self.PROTO
         self.type = self.TYPE
+        if args and kwargs:
+            raise(ValueError("Either args or kwargs is expected, not both."))
         if "raw" in kwargs:
-            for valclass, instance in map(None, self.VALUES, \
-                                       self.unpack(kwargs["raw"])):
+            hdr, values = self.unpack(kwargs["raw"])
+            for valclass, instance in map(None, self.VALUES, values):
                 setattr(self, valclass.NAME, instance)
-        index = 0
+        elif args:
+            index = 0
+            for valclass in self.VALUES:
+                nargs = len(valclass.FIELDS)
+                setattr(self, valclass.NAME,
+                        valclass(*args[index:index+nargs]))
+                index += nargs
+        else:
+            raise(ValueError("One of args or kwargs is expected."))
+
+    def getlen(self):
+        totallen = 0
         for valclass in self.VALUES:
-            nargs = len(valclass.FIELDS)
-            setattr(self, valclass.NAME, valclass(*args[index:index+nargs]))
-            index += nargs
+            totallen += getattr(self, valclass.NAME).getlen()
+        return self.HDR_LEN + totallen
 
     def __repr__(self):
-        s = type(self).__name__ + ": ["
+        s = type(self).__name__ + "("
         for v in self.VALUES:
             s += str(getattr(self, v.NAME)) + ", "
         s = s.rstrip(", ") 
-        s += "]"
+        s += ")"
         return s
 
     def pack(self):
@@ -736,16 +748,23 @@ class TLV(object):
         return packed + ("\x00" * padlen)
 
     def packhdr(self):
-        return struct.pack(self.HDR_FORMAT, self.proto, self.type, self.len)
+        return struct.pack(self.HDR_FORMAT, self.type, self.len)
+
+    def unpackhdr(self, raw):
+        return struct.unpack(self.HDR_FORMAT, raw[:self.HDR_LEN])
 
     def unpack(self, raw):
+        hdr = self.unpackhdr(raw)
+        values = self.unpackvalues(raw[self.HDR_LEN:])
+        return hdr, values
+
+    def unpackvalues(self, raw):
         index = 0
         objs = list()
         for valclass in self.VALUES:
-            valobj = valclass()
-            rawlen = valobj.getlen(raw[index:])
-            objs.append(valclass(raw=raw[index:index+rawlen]))
-            index += rawlen
+            obj = valclass(raw=raw)
+            objs.append(obj)
+            index += obj.getlen()
         # Check for 4 byte alignment
         pad = self.getpad(index)
         if index + pad != len(raw):
@@ -759,15 +778,55 @@ class TLV(object):
         return (alignment - (datalen % alignment)) % alignment
 
 
-class TLVParam(TLV):
-    PROTO  = TLV.PROTO_GENERIC
-    TYPE   = 1
+class TLVParam(TLVBase):
+    TYPE   = TLVBase.PROTO_GENERIC | 1
     VALUES = [ ValueParam ]
 
 
-class TLVInternalv4(TLV):
-    PROTO  = TLV.PROTO_IP4
-    TYPE   = 2
+class TLVAuth(TLVBase):
+    # TODO
+    TYPE   = TLVBase.PROTO_GENERIC | 2
+    VALUES = [ ]
+
+
+class TLVSeq(TLVBase):
+    # TODO
+    TYPE   = TLVBase.PROTO_GENERIC | 3
+    VALUES = [ ]
+
+
+class TLVVersion(TLVBase):
+    # TODO
+    TYPE   = TLVBase.PROTO_GENERIC | 4
+    VALUES = [ ]
+
+
+class TLVMulticastSeq(TLVBase):
+    # TODO
+    TYPE   = TLVBase.PROTO_GENERIC | 5
+    VALUES = [ ]
+
+
+class TLVPeerInfo(TLVBase):
+    # TODO
+    TYPE   = TLVBase.PROTO_GENERIC | 6
+    VALUES = [ ]
+
+
+class TLVPeerTerm(TLVBase):
+    # TODO
+    TYPE   = TLVBase.PROTO_GENERIC | 7
+    VALUES = [ ]
+
+
+class TLVPeerTIDList(TLVBase):
+    # TODO
+    TYPE   = TLVBase.PROTO_GENERIC | 8
+    VALUES = [ ]
+
+
+class TLVInternal4(TLVBase):
+    TYPE   = TLVBase.PROTO_IP4 | 2
     VALUES = [ ValueNexthop, ValueClassicMetric, ValueClassicDest ]
 
 
