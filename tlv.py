@@ -24,17 +24,17 @@ class TLVFactory(object):
             elif _type == TLVAuth.TYPE:
                 return TLVAuth(raw=raw)
             elif _type == TLVSeq.TYPE:
-                return TLVSeq(raw=raw[:TLVSeq.LEN])
+                return TLVSeq(raw=raw)
             elif _type == TLVVersion.TYPE:
-                return TLVVersion(raw=raw[:TLVVersion.LEN])
+                return TLVVersion(raw=raw)
             elif _type == TLVMulticastSeq.TYPE:
-                return TLVMulticastSeq(raw=raw[:TLVMulticastSeq.LEN])
+                return TLVMulticastSeq(raw=raw)
             elif _type == TLVPeerInfo.TYPE:
-                return TLVPeerInfo(raw=raw[:TLVPeerInfo.LEN])
+                return TLVPeerInfo(raw=raw)
             elif _type == TLVPeerTerm.TYPE:
-                return TLVPeerTerm(raw=raw[:TLVPeerTerm.LEN])
+                return TLVPeerTerm(raw=raw)
             elif _type == TLVPeerTIDList.TYPE:
-                return TLVPeerTerm(raw=raw[:TLVPeerTerm.LEN])
+                return TLVPeerTerm(raw=raw)
             else:
                 raise(ValueError("Unknown type in TLV: %d" % _type))
         except struct.error:
