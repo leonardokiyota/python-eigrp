@@ -28,23 +28,20 @@ import functools
 import struct
 import binascii
 import time
+import ipaddr
 from twisted.internet import protocol, base
 from twisted.python import log
-import ipaddr
-from heapq import heappush, heappop
 
-import tw_baseiptransport
-from tw_baseiptransport import reactor
 import sysiface
 import util
+from tw_baseiptransport import reactor
 from tlv import TLVFactory, TLVParam
+import rtp
 
-class EIGRP(protocol.DatagramProtocol):
+class EIGRP(rtp.ReliableTransportProtocol):
 
     DEFAULT_K_VALUES = [ 1, 74, 1, 0, 0 ]
-    DEFAULT_HT_MULTIPLIER = 3
-
-    DST_IP = "224.0.0.10"
+    MC_IP = "224.0.0.10"
 
     def __init__(self, rid, asn, routes, import_routes, requested_ifaces,
                  log_config, admin_port, kvalues=None, hello_interval=5,
@@ -174,7 +171,7 @@ class EIGRP(protocol.DatagramProtocol):
         self.log.debug2("Sending periodic hello.")
         for iface in self._sys.logical_ifaces:
             if iface.activated:
-                self._write(self._hello_pkt, self.DST_IP, iface.ip.ip.exploded)
+                self._write(self._hello_pkt, self.MC_IP, iface.ip.ip.exploded)
         reactor.callLater(self._hello_interval, self._send_periodic_hello)
 
     def _write(self, msg, dst, src=None):
@@ -370,13 +367,19 @@ class EIGRP(protocol.DatagramProtocol):
     def startProtocol(self):
         for iface in self._sys.logical_ifaces:
             if iface.activated:
-                self.transport.joinGroup(self.DST_IP, iface.ip.ip.exploded)
+                self.transport.joinGroup(self.MC_IP, iface.ip.ip.exploded)
 
     def stopProtocol(self):
         self.log.info("EIGRP is shutting down.")
         self._cleanup()
 
-    def datagramReceived(self, data, addr_and_zero):
+    def foundNeighbor(self, neighbor):
+        pass
+
+    def lostNeighbor(self, neighbor):
+        pass
+
+    def rtpReceived(self, neighbor, tlvs):
         addr = addr_and_zero[0]
         self.log.debug5("Received datagram from %s" % addr)
         host_local = False
@@ -439,145 +442,6 @@ class NotSupported(EIGRPException):
 class FormatException(EIGRPException):
     def __init__(self, *args, **kwargs):
         super(EIGRPException, self).__thisclass__.__init__(self, *args, **kwargs)
-
-
-class RTPPacket(object):
-    def __init__(self, hdr, fields):
-        self.hdr = hdr
-        try:
-            iter(fields)
-        except TypeError:
-            self.fields = [fields]
-        else:
-            self.fields = fields
-
-    def pack(self):
-        self.hdr.chksum = 0
-        prehdr = self.hdr.pack()
-        fields = ""
-        for f in self.fields:
-            fields += f.pack()
-        self.hdr.chksum = self.calc_chksum(prehdr + fields)
-        hdr = self.hdr.pack()
-        return hdr + fields
-
-    # Checksum related functions are from:
-    # http://stackoverflow.com/questions/1767910/checksum-udp-calculation-python
-    @staticmethod
-    def calc_chksum(data):
-        """Get one's complement of the one's complement sum of data.
-        Returns the 16 bit checksum.
-        """
-        data = map(lambda x: ord(x), data)
-        data = struct.pack("%dB" % len(data), *data)
-        s = 0
-        for i in range(0, len(data), 2):
-            w = ord(data[i]) + (ord(data[i+1]) << 8)
-            s = RTPPacket.carry_around_add(s, w)
-        return ~s & 0xffff
-
-    @staticmethod
-    def carry_around_add(a, b):
-        c = a + b
-        return (c & 0xffff) + (c >> 16)
-
-
-class RTPHeader2(object):
-    """Reliable Transport Protocol Header (header version 2)."""
-
-    FORMAT = ">BBHIIIHH"
-    LEN    = struct.calcsize(FORMAT)
-    VER    = 2
-
-    OPC_UPDATE   = 1
-    OPC_REQUEST  = 2
-    OPC_QUERY    = 3  # Should this be 4? RFC says 4 but might be a typo.
-    OPC_REPLY    = 4
-    OPC_HELLO    = 5
-    OPC_PROBE    = 7
-    OPC_SIAQUERY = 10
-    OPC_SIAREPLY = 11
-
-    FLAG_INIT = 1
-    FLAG_CR   = 2
-
-    def __init__(self, raw=None, opcode=None, flags=None, seq=None, ack=None,
-                 rid=None, asn=None):
-        if raw and \
-           opcode == None and \
-           flags  == None and \
-           seq    == None and \
-           ack    == None and \
-           rid    == None and \
-           asn    == None:
-            self.unpack(raw)
-        elif not raw and \
-             opcode != None and \
-             flags  != None and \
-             seq    != None and \
-             ack    != None and \
-             rid    != None and \
-             asn    != None:
-            self.opcode = opcode
-            self.flags = flags
-            self.seq = seq
-            self.ack = ack
-            self.rid = rid
-            self.asn = asn
-            self.chksum = 0
-            self.ver = self.VER
-        else:
-            raise(ValueError("Either 'raw' is required, or all other arguments"
-                             " are required."))
-
-    def unpack(self, raw):
-        """Note that self.ver could be different than self.VER if you use
-        this on raw data. If there is ever a new header version, would
-        be nice to make a factory like there is for TLVs."""
-        self.ver, self.opcode, self.chksum, self.flags, self.seq, \
-             self.ack, self.rid, self.asn = struct.unpack(self.FORMAT, raw)
-
-    def pack(self):
-        return struct.pack(self.FORMAT, self.VER, self.opcode, self.chksum,
-                           self.flags, self.seq, self.ack, self.rid,
-                           self.asn)
-
-
-class RTPNeighbor(object):
-    """A router learned via neighbor discovery."""
-
-    STATE_PENDING = 1
-    STATE_UP      = 2
-
-    def __init__(self, ip, iface, seq, holdtime):
-        self.iface = iface
-        self.holdtime = holdtime
-        self.ip = ipaddr.IPv4Address(ip)
-        self.seq = seq
-        self.ack = 0
-        self.reply_pending = False
-        self._queue = list()
-        self.state = self.STATE_PENDING
-        self.last_heard = time.time()
-
-    def popmsg(self):
-        """Pop an RTP message off of the transmission queue."""
-        try:
-            return heappop(self._queue)
-        except IndexError:
-            return None
-
-    def pushmsg(self, msg):
-        """Push an RTP message onto the transmission queue."""
-        return heappush(self._queue, msg)
-
-    def peekmsg(self, msg):
-        """Return the RTP message that will be popped on the next popmsg
-        call."""
-        try:
-            return self._queue[0]
-        except IndexError:
-            return None
 
 
 def parse_args(argv):

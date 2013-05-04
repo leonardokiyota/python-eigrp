@@ -3,48 +3,6 @@
 import struct
 import ipaddr
 
-class TLVFactory(object):
-    """Factory for EIGRP TLV fields."""
-
-    def build_all(self, raw):
-        """Generator to yield all parsed TLVs from raw data."""
-        index = 0
-        rawlen = len(raw)
-        while index < rawlen:
-            tlv = self.build(raw[index:])
-            index += tlv.getlen()
-            yield tlv
-
-    def build(self, raw):
-        """Returns one TLV parsed from raw data."""
-        try:
-            _type, _len = self.unpack_hdr(raw)
-            if _type == TLVParam.TYPE:
-                return TLVParam(raw=raw)
-            elif _type == TLVAuth.TYPE:
-                return TLVAuth(raw=raw)
-            elif _type == TLVSeq.TYPE:
-                return TLVSeq(raw=raw)
-            elif _type == TLVVersion.TYPE:
-                return TLVVersion(raw=raw)
-            elif _type == TLVMulticastSeq.TYPE:
-                return TLVMulticastSeq(raw=raw)
-            elif _type == TLVPeerInfo.TYPE:
-                return TLVPeerInfo(raw=raw)
-            elif _type == TLVPeerTerm.TYPE:
-                return TLVPeerTerm(raw=raw)
-            elif _type == TLVPeerTIDList.TYPE:
-                return TLVPeerTerm(raw=raw)
-            else:
-                raise(ValueError("Unknown type in TLV: %d" % _type))
-        except struct.error:
-            raise
-            #raise(FormatException("Unpacking failed (malformed TLV?)."))
-
-    @staticmethod
-    def unpack_hdr(raw):
-        return struct.unpack(TLVBase.HDR_FORMAT, raw[:TLVBase.HDR_LEN])
-
 
 class ValueMetaclass(type):
     """Metaclass for values in the TLV.
@@ -91,25 +49,27 @@ class ValueBase(object):
         self._packed = None
 
     def _get_public_fields(self):
+        """Get public class fields. Override in subclass if this should
+        return something other than the regular self.FIELDS."""
         return self.FIELDS
 
     def _get_private_fields(self):
         """Get private class fields. Override in subclass if this should
-        return something besides the regular self.FIELDS."""
+        return something other than the regular self.FIELDS."""
         return self.FIELDS
 
     def getlen(self):
         return self.LEN
 
     def pack(self):
-        """Return the binary representation of this object."""
+        """Return the binary stresentation of this object."""
         if not self._packed:
             self._packed = struct.pack(self.FORMAT,
                        *[getattr(self, f) for f in self._get_private_fields()])
         return self._packed
 
     def unpack(self, raw):
-        """Return a tuple containing the unpacked representation of this
+        """Return a tuple containing the unpacked stresentation of this
         object. Return values correspond to self.FIELDS."""
         return struct.unpack(self.FORMAT, raw[:self.getlen()])
 
@@ -118,7 +78,7 @@ class ValueBase(object):
         super(object, self).__thisclass__.__setattr__(self, "_packed", None)
         super(object, self).__thisclass__.__setattr__(self, attr, val)
 
-    def __repr__(self):
+    def __str__(self):
         s = type(self).__name__ + "("
         for f in self.FIELDS:
             s += f + "=" + str(getattr(self, f)) + ", "
@@ -138,7 +98,7 @@ class ValueNexthop(ValueBase):
 
     def unpack(self, raw):
         return [ipaddr.IPv4Address(super(ValueBase,
-                                     self).__thisclass__.unpack(self, raw)[0])]
+                                   self).__thisclass__.unpack(self, raw)[0])]
 
     def pack(self):
         if not self._packed:
@@ -255,6 +215,7 @@ class ValueParam(ValueBase):
     FORMAT = "BBBBBxH"
 
 
+
 class TLVBase(object):
     """Base class for EIGRP TLVs."""
 
@@ -292,7 +253,7 @@ class TLVBase(object):
             totallen += getattr(self, valclass.NAME).getlen()
         return self.HDR_LEN + totallen
 
-    def __repr__(self):
+    def __str__(self):
         s = type(self).__name__ + "("
         for v in self.VALUES:
             s += str(getattr(self, v.NAME)) + ", "
@@ -313,13 +274,9 @@ class TLVBase(object):
     def packhdr(self):
         return struct.pack(self.HDR_FORMAT, self.type, self.len)
 
+    @staticmethod
     def unpackhdr(self, raw):
-        return struct.unpack(self.HDR_FORMAT, raw[:self.HDR_LEN])
-
-    def unpack(self, raw):
-        hdr = self.unpackhdr(raw)
-        values = self.unpackvalues(raw[self.HDR_LEN:])
-        return hdr, values
+        return struct.unpack(TLVBase.HDR_FORMAT, raw[:TLVBase.HDR_LEN])
 
     def unpackvalues(self, raw):
         index = 0
@@ -334,6 +291,11 @@ class TLVBase(object):
             raise(ValueError("Raw data was not padded to 4 bytes, or" 
                              "garbage follows the data."))
         return objs
+
+    def unpack(self, raw):
+        hdr = self.unpackhdr(raw)
+        values = self.unpackvalues(raw[self.HDR_LEN:])
+        return hdr, values
 
     @staticmethod
     def getpad(datalen, alignment=4):
@@ -391,3 +353,52 @@ class TLVPeerTIDList(TLVBase):
 class TLVInternal4(TLVBase):
     TYPE   = TLVBase.PROTO_IP4 | 2
     VALUES = [ ValueNexthop, ValueClassicMetric, ValueClassicDest ]
+
+
+class TLVFactory(object):
+    """Factory for arbitrary Type Length Value fields."""
+
+    def __init__(self, tlvclasses=None, hdr_unpacker=TLVBase.unpackhdr,
+                 typeindex=0):
+        """tlvclasses is an iterable of classes to register during init.
+        hdr_unpacker is a function that can be used to unpack TLV headers for
+                     the format your TLVs will use. This should return
+                     an indexable object containing at least a "type" field.
+        typeindex is the index of the "type" field that is returned from
+                  hdr_unpacker. It does seem silly for this to be something
+                  other than 0 given the order of words in the name "TLV",
+                  but it's an option."""
+        self._tlvs = dict()
+        if tlvclasses:
+            self.register_tlvs(tlvclasses)
+        self._unpack_hdr = hdr_unpacker
+        self._typeindex = typeindex
+
+    def register_tlvs(tlvclasses):
+        try:
+            iter(tlvclasses)
+        except TypeError:
+            tlvclasses = list(tlvclasses)
+        for tlv in tlvclasses:
+            if tlv.TYPE in self._tlvs:
+                raise(ValueError("TLV type %d already registered." % tlv.TYPE))
+            self._tlvs[tlv.TYPE] = tlv
+
+    def build_all(self, raw):
+        """Generator to yield all parsed TLVs from raw data."""
+        index = 0
+        rawlen = len(raw)
+        while index < rawlen:
+            tlv = self.build(raw[index:])
+            index += tlv.getlen()
+            yield tlv
+
+    def build(self, raw):
+        """Returns one TLV parsed from raw data."""
+        try:
+            _type = self.unpack_hdr(raw)[self._typeindex]
+            return self._tlvs[_type](raw=raw)
+        except struct.error:
+            raise
+        except KeyError:
+            raise(ValueError("Unknown type in TLV: %d" % _type))
