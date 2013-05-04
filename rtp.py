@@ -22,7 +22,8 @@ class ReliableTransportProtocol(protocol.DatagramProtocol):
                  hello_interval=5, hdrver=2):
         """logger -- The log object to use
         tlvclasses -- An iterable of TLV classes that the upper layer protocol
-                      wishes to receive.
+                      wishes to use. These will be registered with RTP's
+                      TLV factory.
         kvalues -- A list of values that must match before establishing a
                    neighbor relationship (when used with EIGRP these are
                    metric weights).
@@ -97,17 +98,9 @@ class ReliableTransportProtocol(protocol.DatagramProtocol):
 
         self._tlvfactory = tlv.TLVFactory()
         self._tlvfactory.register_tlvs(self._rtp_tlvs)
-
         if tlvclasses:
             self._tlvfactory.register_tlvs(tlvclasses)
             self._upperlayer_tlvs = dict()
-            for tlv in tlvclasses:
-                if tlv in self._upperlayer_tlvs:
-                    raise(ValueError("TLV type %d already registered." % \
-                                     tlv.TYPE))
-                self._upperlayer_tlvs[tlv.TYPE] = tlv
-
-        
 
     def datagramReceived(self, data, addr_and_port):
         # XXX Currently only expecting to ride directly over IP, so we
@@ -135,9 +128,12 @@ class ReliableTransportProtocol(protocol.DatagramProtocol):
                           "host %s" % (hdr.hdrver, addr))
             return
 
-        # Build TLVs and handle RTP-related messages. Pass to upper layer
-        # protocol if the opcode is not specific to RTP.
-        tlvs = self._tlvfactory.build_all(payload)
+        # Handle RTP-related messages. Look in all headers for ACKs/sequence
+        # info.
+        # XXX Catch and log exceptions from factory
+        if hdr.opcode == self._rtphdr.OPC_HELLO:
+            tlvs = self._tlvfactory.build_all(payload)
+            self._process_hello(neighbor, hello)
         try:
             handler = self._op_handlers[hdr.opcode]
             handler(addr, hdr, tlvs)
@@ -145,20 +141,9 @@ class ReliableTransportProtocol(protocol.DatagramProtocol):
             neighbor = self._get_neighbor(addr, hdr)
             if not neighbor:
                 self.log.info("Received unexpected opcode %d from " \
-                              "non-neighbor %s" % hdr.opcode, addr)
+                              "non-neighbor %s" % (hdr.opcode, addr))
                 return
             self.rtpReceived(neighbor, tlvs)
-        # Pass desired TLVs to the upper layer. Note that upper layers
-        # can request TLVs that are also processed by RTP if they
-        # really want to.
-        for tlv in tlvs:
-            if tlv.TYPE in self_upperlayer_tlvs:
-                
-            try:
-                self.tlvReceived(neighbor, self._upperlayer_tlvs[tlv.TYPE])
-            except KeyError:
-                self.log.info("Received unhandled TLV type %d from %s." % \
-                              (tlv.TYPE, addr))
 
 
 class RTPPacket(object):

@@ -368,7 +368,7 @@ class TLVFactory(object):
                   hdr_unpacker. It does seem silly for this to be something
                   other than 0 given the order of words in the name "TLV",
                   but it's an option."""
-        self._tlvs = dict()
+        self.tlvs = dict()
         if tlvclasses:
             self.register_tlvs(tlvclasses)
         self._unpack_hdr = hdr_unpacker
@@ -380,9 +380,9 @@ class TLVFactory(object):
         except TypeError:
             tlvclasses = list(tlvclasses)
         for tlv in tlvclasses:
-            if tlv.TYPE in self._tlvs:
+            if tlv.TYPE in self.tlvs:
                 raise(ValueError("TLV type %d already registered." % tlv.TYPE))
-            self._tlvs[tlv.TYPE] = tlv
+            self.tlvs[tlv.TYPE] = tlv
 
     def build_all(self, raw):
         """Generator to yield all parsed TLVs from raw data."""
