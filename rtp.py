@@ -89,13 +89,13 @@ class ReliableTransportProtocol(protocol.DatagramProtocol):
         else:
             raise(ValueError("Unsupported header version: %d" % hdrver))
 
+        self._fsm = NeighborFSM()
         self._rtp_tlvs = [ tlv.TLVParam,        \
                            tlv.TLVAuth,         \
                            tlv.TLVSeq,          \
                            tlv.TLVVersion,      \
                            tlv.TLVMulticastSeq, \
                          ]
-
         self._tlvfactory = tlv.TLVFactory()
         self._tlvfactory.register_tlvs(self._rtp_tlvs)
         if tlvclasses:
@@ -104,10 +104,9 @@ class ReliableTransportProtocol(protocol.DatagramProtocol):
 
     def datagramReceived(self, data, addr_and_port):
         # XXX Currently only expecting to ride directly over IP, so we
-        # ignore the unused port argument. We may not always be used directly
-        # over IP.
+        # ignore the unused port argument. Should remove this restriction.
         addr = addr_and_port[0]
-        try:    
+        try:
             hdr = self._rtphdr(data[:self._rtphdr.LEN])
         except struct.error:
             bytes_to_print = self._rtphdr.LEN
@@ -124,16 +123,45 @@ class ReliableTransportProtocol(protocol.DatagramProtocol):
                            (addr, real_chksum, real_chksum))
             return
         if hdr.ver != self._rtphdr.VER:
-            self.log.warn("Received incompatible header version %d from "
-                          "host %s" % (hdr.hdrver, addr))
+            self.log.debug("Received incompatible header version %d." % \
+                           (hdr.hdrver, addr))
             return
 
         # Handle RTP-related messages. Look in all headers for ACKs/sequence
         # info.
         # XXX Catch and log exceptions from factory
+        neighbor.receive(hdr, tlvs)
+        neighbor = self._get_neighbor(addr)
+        if not neighbor:
+            if hdr.opcode != self._rtphdr.OPC_HELLO and \
+               hdr.opcode != self._rtphdr.OPC_UPDATE:
+                self.log.debug("Received unexpected opcode %d from "
+                               "non-neighbor." % hdr.opcode)
+                return
+            if not self._verify_neighbor(hdr, tlvs):
+                self.log.debug("Neighbor failed verification.")
+                return
+            self._add_neighbor(addr, port, hdr, tlvs)
+
+        tlvs = self._tlvfactory.build_all(payload)
+        if neighbor.state == neighbor.PENDING:
+            if 
+            self._
+            tlvs
+        elif neighbor.state == neighbor.UP:
+            
+
         if hdr.opcode == self._rtphdr.OPC_HELLO:
             tlvs = self._tlvfactory.build_all(payload)
-            self._process_hello(neighbor, hello)
+            self._process_hello(neighbor, addr, hdr, tlvs)
+            return
+        if neighbor.state(neighbor.UP):
+            
+            self.rtpReceived(neighbor, hdr, tlvs)
+        else:
+            
+
+        # XXX junk follows
         try:
             handler = self._op_handlers[hdr.opcode]
             handler(addr, hdr, tlvs)
@@ -144,6 +172,9 @@ class ReliableTransportProtocol(protocol.DatagramProtocol):
                               "non-neighbor %s" % (hdr.opcode, addr))
                 return
             self.rtpReceived(neighbor, tlvs)
+
+
+class NeighborFSM():
 
 
 class RTPPacket(object):

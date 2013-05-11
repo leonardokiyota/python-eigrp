@@ -379,7 +379,7 @@ class EIGRP(rtp.ReliableTransportProtocol):
     def lostNeighbor(self, neighbor):
         pass
 
-    def rtpReceived(self, neighbor, tlvs):
+    def rtpReceived(self, neighbor, hdr, tlvs):
         addr = addr_and_zero[0]
         self.log.debug5("Received datagram from %s" % addr)
         host_local = False
