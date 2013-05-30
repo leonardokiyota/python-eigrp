@@ -111,12 +111,9 @@ class EIGRP(rtp.ReliableTransportProtocol):
             raise(ValueError("Unsupported header version: %d" % hdrver))
 
         self._init_logging(log_config)
-        if sys.platform == "linux2":
-            self._sys = sysiface.LinuxSystem(log_config=log_config)
-        elif sys.platform == "win":
-            self._sys = sysiface.WindowsSystem(log_config=log_config)
-        else:
-            raise(NotSupported("No support for current OS."))
+        self._sys = sysiface.system
+        self._sys.init_logging(log_config)
+
         self._register_op_handlers()
         self._build_hello_pkt()
         for iface in requested_ifaces:
@@ -125,7 +122,6 @@ class EIGRP(rtp.ReliableTransportProtocol):
         self._neighbors = list()
         self._seq = 1
         self._crmode = False
-        reactor.callWhenRunning(self._send_periodic_hello)
         #eigrpadmin.run(self, port=admin_port)
 
     def activate_iface(self, req_iface):
@@ -151,28 +147,6 @@ class EIGRP(rtp.ReliableTransportProtocol):
         self.log = logging.getLogger("EIGRP")
         suppress_reactor_not_running = functools.partial(util.suppress_reactor_not_running, logfunc=self.log.debug)
         log.addObserver(suppress_reactor_not_running)
-
-    def _build_hello_pkt(self):
-        """Called to create the hello packet that should be sent at every
-        hello interval. This should be called at startup and whenever the
-        k-values or holdtime changes."""
-        hdr = self._rtphdr(opcode=self._rtphdr.OPC_HELLO, flags=0,
-                           seq=0, ack=0, rid=self._rid,
-                           asn=self._asn)
-        fields = TLVParam(self._k1,
-                          self._k2,
-                          self._k3,
-                          self._k4,
-                          self._k5,
-                          self._holdtime)
-        self._hello_pkt = RTPPacket(hdr, fields).pack()
-
-    def _send_periodic_hello(self):
-        self.log.debug2("Sending periodic hello.")
-        for iface in self._sys.logical_ifaces:
-            if iface.activated:
-                self._write(self._hello_pkt, self.MC_IP, iface.ip.ip.exploded)
-        reactor.callLater(self._hello_interval, self._send_periodic_hello)
 
     def _write(self, msg, dst, src=None):
         self.log.debug5("Writing packet to %s, iface %s." % (dst, \
@@ -348,11 +322,7 @@ class EIGRP(rtp.ReliableTransportProtocol):
             return False
 
         # XXX Deal with sequence number wrapping, skip 0
-        if hdr.seq != neighbor.seq + 1:
-            # Out of order packet
-            self.log.debug5("Neighbor sent SEQ %d, expected %d." % \
-                           (hdr.seq, neighbor.seq))
-            return False
+
         # Send ack for received packet and allow processing
         self._send_ack(addr, hdr.seq)
         neighbor.seq = hdr.seq

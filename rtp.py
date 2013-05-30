@@ -5,11 +5,13 @@
 import struct
 import ipaddr
 from heapq import heappush, heappop
-
 from twisted.internet import fdesc, base, udp, main, reactor
 from twisted.python import log
 from twisted.internet.main import installReactor
+import copy
+import time
 
+import sysiface
 import tlv
 
 DEFAULT_HT_MULTIPLIER = 3
@@ -18,54 +20,65 @@ class ReliableTransportProtocol(protocol.DatagramProtocol):
     """An implementation of the Reliable Transport Protocol and Neighbor
     Discovery/Recovery used with EIGRP."""
 
-    def __init__(self, logger, tlvclasses=None, kvalues=None, rid=0, asn=0,
-                 hello_interval=5, hdrver=2):
+    # XXX Change single underscore members/methods to double leading
+    # underscore for mangling
+
+    def __init__(self, logger, multicast_ip, port=0, tlvclasses=None,
+                 kvalues=None, rid=0, asn=0, hello_interval=5, hdrver=2):
         """logger -- The log object to use
+        multicast_ip -- The multicast IP to ues
+        port -- The port to use, if applicable
         tlvclasses -- An iterable of TLV classes that the upper layer protocol
                       wishes to use. These will be registered with RTP's
-                      TLV factory.
+                      TLV factory
         kvalues -- A list of values that must match before establishing a
                    neighbor relationship (when used with EIGRP these are
-                   metric weights).
-        rid -- The router ID.
-        asn -- The autonomous system number.
-        hello_interval -- Hello interval. Also influences neighbor timeout.
-        hdrver -- The version of the RTP header to use.
+                   metric weights)
+        rid -- The router ID
+        asn -- The autonomous system number
+        hello_interval -- Hello interval. Also influences neighbor timeout
+        hdrver -- The version of the RTP header to use
         """
         # XXX Should probably figure out Twisted's log observers and use that.
-        asn_rid_err_msg = "%s must be a positive number less than 65536."
+
+        self.__sys = sysiface.system
+        self.__init_ifaces()
+        asn_rid_err_msg = "{} must be a positive number less than 65536."
         if not isinstance(rid, int):
-            raise(TypeError(asn_rid_err_msg % "Router ID"))
+            raise(TypeError(asn_rid_err_msg.format("Router ID")))
         if not (0 <= rid < 65536):
-            raise(ValueError(asn_rid_err_msg % "Router ID"))
+            raise(ValueError(asn_rid_err_msg.format("Router ID")))
         if not isinstance(asn, int):
-            raise(TypeError(asn_rid_err_msg % "AS Number"))
+            raise(TypeError(asn_rid_err_msg.format("AS Number")))
         if not (0 <= asn < 65536):
-            raise(ValueError(asn_rid_err_msg % "AS Number"))
-        self._rid = rid
-        self._asn = asn
-        self._ht_multiplier = self.DEFAULT_HT_MULTIPLIER
+            raise(ValueError(asn_rid_err_msg.format("AS Number")))
+        self.__rid = rid
+        self.__asn = asn
+        self._ht_multiplier = rtp.DEFAULT_HT_MULTIPLIER
         self.log = logger
+        self.__seq = 1
+        self.__multicast_ip = multicast_ip
+        self.__port = port
 
         # Holdtime must fit in a 16 bit field, so the hello interval could
         # in theory be set to a max of 65535/HT_MULTIPLIER. Since this is
         # measured in seconds, in reality it will be set much shorter.
         max_hello_interval = 65535 / self._ht_multiplier
         if not (1 <= hello_interval <= max_hello_interval):
-            raise(ValueError("hello_interval must be between 1 and %d" % \
-                             max_hello_interval))
+            raise(ValueError("hello_interval must be between 1 and "
+                             "{}".format(max_hello_interval)))
 
-        self._hello_interval = hello_interval
-        self._holdtime = self._hello_interval * self._ht_multiplier
+        self.__hello_interval = hello_interval
+        self.__holdtime = self._hello_interval * self._ht_multiplier
 
         if not kvalues:
             # Allow kvalues to be effectively ignored if the upper layer
             # protocol doesn't need it.
-            self._k1 = 0
-            self._k2 = 0
-            self._k3 = 0
-            self._k4 = 0
-            self._k5 = 0
+            self.__k1 = 0
+            self.__k2 = 0
+            self.__k3 = 0
+            self.__k4 = 0
+            self.__k5 = 0
         elif len(kvalues) != 5:
             raise(ValueError("Exactly 5 K-values must be present."))
         elif not sum(kvalues):
@@ -78,104 +91,271 @@ class ReliableTransportProtocol(protocol.DatagramProtocol):
                                          "255."))
             except TypeError:
                 raise(TypeError("kvalues must be an iterable."))
-            self._k1 = kvalues[0]
-            self._k2 = kvalues[1]
-            self._k3 = kvalues[2]
-            self._k4 = kvalues[3]
-            self._k5 = kvalues[4]
+            self.__k1 = kvalues[0]
+            self.__k2 = kvalues[1]
+            self.__k3 = kvalues[2]
+            self.__k4 = kvalues[3]
+            self.__k5 = kvalues[4]
 
         if hdrver == 2:
-            self._rtphdr = RTPHeader2
+            self.__rtphdr = RTPHeader2
         else:
-            raise(ValueError("Unsupported header version: %d" % hdrver))
+            raise(ValueError("Unsupported header version: {}".format(hdrver)))
 
-        self._fsm = NeighborFSM()
-        self._rtp_tlvs = [ tlv.TLVParam,        \
-                           tlv.TLVAuth,         \
-                           tlv.TLVSeq,          \
-                           tlv.TLVVersion,      \
-                           tlv.TLVMulticastSeq, \
-                         ]
-        self._tlvfactory = tlv.TLVFactory()
-        self._tlvfactory.register_tlvs(self._rtp_tlvs)
+        self.__tlvfactory = tlv.TLVFactory()
+        self.__tlvfactory.register_tlvs([tlv.TLVParam,        \
+                                         tlv.TLVAuth,         \
+                                         tlv.TLVSeq,          \
+                                         tlv.TLVVersion,      \
+                                         tlv.TLVMulticastSeq, \
+                                        ])
         if tlvclasses:
-            self._tlvfactory.register_tlvs(tlvclasses)
-            self._upperlayer_tlvs = dict()
+            self.__tlvfactory.register_tlvs(tlvclasses)
+        self.__update_hello_tlvs()
+        reactor.callWhenRunning(self.__send_periodic_hello)
+
+    def __init_ifaces(self):
+        self.__ifaces = list()
+        for iface in self.__sys.logical_ifaces:
+            self.__ifaces.append(rtpiface.RTPInterface(iface,
+                                      self.__send_rtp_multicast,
+                                      self.__rtphdr))
+
+    def __send_periodic_hello(self):
+        self.log.debug2("Sending periodic hello.")
+        for iface in self.__sys.logical_ifaces:
+            if iface.activated:
+                self.__send_hello(iface)
+        reactor.callLater(self.__hello_interval, self.__send_periodic_hello)
+
+    def __send_hello(self, iface):
+        iface.send(self.__rtphdr.OPC_HELLO, self.__hello_tlvs, False)
+
+    def __send_init(self, neighbor):
+        pkt = self.__make_pkt(self.__rtphdr.OPC_UPDATE, [], True,
+                              self.__rtphdr.FLAG_INIT)
+        self.__send_rtp_unicast(neighbor, pkt)
+
+    def __update_hello_tlvs(self):
+        """Called to create the hello packet's TLVs that should be sent at
+        every hello interval. This should be called at startup and whenever
+        the k-values or holdtime changes."""
+        self.__hello_tlvs = TLVParam(self.__k1,
+                                     self.__k2,
+                                     self.__k3,
+                                     self.__k4,
+                                     self.__k5,
+                                     self.__holdtime)
+
+    def foundNeighbor(self, neighbor):
+        """Called when a neighbor adjacency is established."""
+        pass
+
+    def lostNeighbor(self, neighbor):
+        """Called when a neighbor has timed out or should otherwise be
+        considered unreachable. This is called before removing the neighbor
+        from its interface."""
+        pass
+
+    def __rtp_found_neighbor(self, neighbor):
+        self.log.debug("Found neighbor {}, iface {}".format(neighbor,
+                       neighbor.iface))
+        self.foundNeighbor(neighbor)
+
+    def __rtp_lost_neighbor(self, neighbor):
+        self.log.debug("Lost neighbor {}, iface {}".format(neighbor,
+                       neighbor.iface))
+        self.lostNeighbor(neighbor)
+        neighbor.iface.del_neighbor(neighbor)
 
     def datagramReceived(self, data, addr_and_port):
         # XXX Currently only expecting to ride directly over IP, so we
         # ignore the unused port argument. Should remove this restriction.
         addr = addr_and_port[0]
+        port = addr_and_port[1]
+
+        input_iface = self.__get_input_iface(addr)
+        if not input_iface:
+            self.log.warn("Received datagram from non-link-local host: "
+                          "{}".format(addr))
         try:
-            hdr = self._rtphdr(data[:self._rtphdr.LEN])
+            hdr = self.__rtphdr(data[:self.__rtphdr.LEN])
         except struct.error:
-            bytes_to_print = self._rtphdr.LEN
-            self.log.warn("Received malformed datagram from %s. Hexdump of "
-                          "first %d bytes: %s" % (addr, bytes_to_print, \
-                          binascii.hexlify(data[:bytes_to_print])))
+            bytes_to_print = self.__rtphdr.LEN
+            self.log.warn("Received malformed datagram from {}. Hexdump of "
+                          "first {} bytes: {}".format((addr, bytes_to_print, \
+                          binascii.hexlify(data[:bytes_to_print]))))
             return
         observed_chksum = hdr.chksum
         hdr.chksum = 0
-        payload = data[self._rtphdr.LEN:]
+        payload = data[self.__rtphdr.LEN:]
         real_chksum = RTPPacket.calc_chksum(hdr.pack() + payload)
         if real_chksum != observed_chksum:
             self.log.debug("Bad checksum: expected 0x%x, was 0x%x" % \
                            (addr, real_chksum, real_chksum))
             return
-        if hdr.ver != self._rtphdr.VER:
-            self.log.debug("Received incompatible header version %d." % \
-                           (hdr.hdrver, addr))
+        if hdr.ver != self.__rtphdr.VER:
+            self.log.debug("Received incompatible header version "
+                           "{}.".format(hdr.hdrver, addr))
             return
 
-        # Handle RTP-related messages. Look in all headers for ACKs/sequence
-        # info.
         # XXX Catch and log exceptions from factory
-        neighbor.receive(hdr, tlvs)
-        neighbor = self._get_neighbor(addr)
+        tlvs = self.__tlvfactory.build_all(payload)
+
+        # Handle RTP-related messages. Look in header for ACKs.
+        neighbor = self.__get_neighbor(iface, addr)
         if not neighbor:
-            if hdr.opcode != self._rtphdr.OPC_HELLO and \
-               hdr.opcode != self._rtphdr.OPC_UPDATE:
-                self.log.debug("Received unexpected opcode %d from "
-                               "non-neighbor." % hdr.opcode)
+            if hdr.opcode != self.__rtphdr.OPC_HELLO:
+                self.log.debug("Received unexpected opcode {} from "
+                               "non-neighbor.".format(hdr.opcode))
                 return
-            if not self._verify_neighbor(hdr, tlvs):
+            if not self.__verify_neighbor_kvalues(hdr, tlvs):
                 self.log.debug("Neighbor failed verification.")
                 return
-            self._add_neighbor(addr, port, hdr, tlvs)
-
-        tlvs = self._tlvfactory.build_all(payload)
-        if neighbor.state == neighbor.PENDING:
-            if 
-            self._
-            tlvs
-        elif neighbor.state == neighbor.UP:
-            
-
-        if hdr.opcode == self._rtphdr.OPC_HELLO:
-            tlvs = self._tlvfactory.build_all(payload)
-            self._process_hello(neighbor, addr, hdr, tlvs)
-            return
-        if neighbor.state(neighbor.UP):
-            
-            self.rtpReceived(neighbor, hdr, tlvs)
-        else:
-            
-
-        # XXX junk follows
-        try:
-            handler = self._op_handlers[hdr.opcode]
-            handler(addr, hdr, tlvs)
-        except KeyError:
-            neighbor = self._get_neighbor(addr, hdr)
+            neighbor = self.__add_neighbor(addr, port, hdr)
             if not neighbor:
-                self.log.info("Received unexpected opcode %d from " \
-                              "non-neighbor %s" % (hdr.opcode, addr))
+                self.log.debug("Failed to add neighbor.")
                 return
-            self.rtpReceived(neighbor, tlvs)
 
+        neighbor_receive_status = neighbor.receive(addr, port, hdr, tlvs)
+        if neighbor_receive_status == neighbor.PROCESS:
+            self.log.debug5("Passing packet to upper layer for processing.")
+            self.rtpReceived(neighbor, hdr, tlvs)
+        elif neighbor_receive_status == neighbor.DROP:
+            self.log.debug5("RTP stopped processing for this packet.")
+        elif neighbor_receive_status == neighbor.INIT:
+            self.__send_hello(neighbor.iface)
+            self.__send_init(neighbor)
+        elif neighbor_receive_status == neighbor.NEW_ADJACENCY:
+            self.__rtp_found_neighbor(neighbor)
+        else:
+            raise(AssertionFailure("Unknown RTP Neighbor receive status: "
+                                   "{}".format(neighbor_receive_status)))
 
-class NeighborFSM():
+        # If an ACK is needed and one wasn't sent by RTP.send (i.e. no reply
+        # has been sent yet by upper layer), send an explicit ack.
+        if neighbor.next_ack:
+            self.__send_explicit_ack(neighbor)
 
+    def __send_explicit_ack(self, neighbor):
+        hdr = self.__rtphdr(opcode=self.__rtphdr.OPC_HELLO, flags=0, seq=0,
+                           ack=neighbor.next_ack, rid=self.__rid,
+                           asn=self.__asn)
+        msg = RTPPacket(hdr, []).pack()
+        neighbor.next_ack = 0
+        self.__send(msg, neighbor.logical_iface.ip.ip, self.__port)
+
+    def __get_input_iface(self, ip):
+        for iface in self.__ifaces:
+            if ip in iface.logical_iface.ip:
+                return iface
+        return None
+
+    def __add_neighbor(self, addr, port, hdr, iface):
+        """Add a neighbor to the list of neighbors.
+        Return the new neighbor object, or None on failure."""
+        addr = ipaddr.IPv4Address(addr)
+        found_iface = False
+        for iface in self.__ifaces:
+            if addr in iface.logical_iface.ip:
+                break
+        if not found_iface:
+            self.log.debug("Preventing adjacency with non-link-local "
+                           "neighbor.")
+            return None
+        neighbor = RTPNeighbor(addr,
+                               iface,
+                               hdr.seq,
+                               hdr.holdtime,
+                               self.__rtphdr,
+                               self.log,
+                               self.__rtp_lost_neighbor,
+                               self.__make_pkt,
+                               self.__send_rtp_unicast)
+        iface.neighbors.append(neighbor)
+        return neighbor
+
+    def __verify_neighbor_kvalues(self, hdr, tlvs):
+        """Checks advertised kvalues against our own.
+        Returns True if we should continue processing, otherwise returns
+        False."""
+        for tlv in tlvs:
+            if tlv.type == tlv.TLVParam.type:
+                if tlv.param.k1 != self.__k1 or \
+                   tlv.param.k2 != self.__k2 or \
+                   tlv.param.k3 != self.__k3 or \
+                   tlv.param.k4 != self.__k4 or \
+                   tlv.param.k5 != self.__k5:
+                    self.log.debug("Kvalue mismatch between potential "
+                                   "neighbor. Neighbor kvalues: {}, {}, {}, "
+                                   "{}, {}".format(tlv.param.k1, tlv.param.k2, \
+                                   tlv.param.k3, tlv.param.k4, tlv.param.k5))
+                    return False
+                return True
+            else:
+                self.log.debug("Unexpected TLV type {} in "
+                               "HELLO.".format(tlv.type))
+                return False
+
+    def __get_seq(self):
+        self.__seq += 1
+        return self.__seq
+
+    def __send_rtp_unicast(self, neighbor, pkt):
+        """Send an RTP packet as a unicast.
+        neighbor -- The neighbor to send to
+        pkt -- The RTP packet to send
+        """
+        self.log.debug5("Sending unicast to {}: {}".format(neighbor, pkt))
+        pkt.hdr.ack = neighbor.next_ack
+        neighbor.next_ack = 0
+        msg = pkt.pack()
+        self.__send(msg, neighbor.ip.ip, self.__port)
+
+    def __send_rtp_multicast(self, iface, opcode, tlvs, ack):
+        """Send an RTP packet as a multicast.
+        iface -- The interface object to send from
+        opcode -- The opcode number to use in the RTP header
+        tlvs -- An iterable of TLVs to send
+        ack -- If the packet requires an acknowledgment
+        """
+        pkt = self.__make_pkt(opcode, tlvs, ack)
+        self.log.debug5("Sending multicast out iface {}: {}".format(iface, \
+                        pkt))
+        if ack:
+            seq_ips = list()
+            for neighbor in iface.neighbors:
+                # If neighbor has a full queue, add it to a seq tlv
+                if neighbor.queue_full():
+                    seq_ips.append(neighbor)
+                # We only really need to copy the hdr since the tlvs won't
+                # change.
+                neighbor.schedule_multicast_retransmission(copy.deepcopy(pkt))
+            if seq_ips:
+                self.__send_seq_tlv(iface, seq_ips)
+                hdr.flags |= self.__rtphdr.FLAG_CR
+        self.__send(pkt.pack(), self.__multicast_ip, self.__port,
+                    iface.logical_iface.ip)
+
+    def __send(self, msg, ip, port, src=None):
+        if src:
+            self.setOutgoingInterface(src)
+        self.transport.write(msg, (ip, port))
+
+    def __make_pkt(self, opcode, tlvs, ack, flags=0):
+        """Generate an RTP packet.
+        opcode -- The RTP opcode number
+        tlvs -- An iterable of TLVs
+        ack -- If an ack is required for this packet
+        """
+        if ack:
+            seq = self.__get_seq()
+        else:
+            seq = 0
+        hdr = self.__rtphdr(opcode=opcode, flags=flags, seq=seq, ack=0,
+                           rid=self.__rid, asn=self.__asn)
+        pkt = RTPPacket(hdr, tlvs)
+        return pkt
 
 class RTPPacket(object):
     def __init__(self, hdr, fields):
@@ -227,7 +407,7 @@ class RTPHeader2(object):
 
     OPC_UPDATE   = 1
     OPC_REQUEST  = 2
-    OPC_QUERY    = 3  # Should this be 4? RFC says 4 but might be a typo.
+    OPC_QUERY    = 3
     OPC_REPLY    = 4
     OPC_HELLO    = 5
     OPC_PROBE    = 7
@@ -280,37 +460,238 @@ class RTPHeader2(object):
 
 
 class RTPNeighbor(object):
-    """A router learned via neighbor discovery."""
+    """A neighbor learned via neighbor discovery."""
 
-    STATE_PENDING = 1
-    STATE_UP      = 2
+    # Return codes for receive
+    DROP          = 1
+    INIT          = 2
+    PROCESS       = 3
+    NEW_ADJACENCY = 4
 
-    def __init__(self, ip, iface, seq, holdtime):
+    def __init__(self, ip, iface, seq, holdtime, rtphdr, log, dropfunc,
+                 make_pkt, sendfunc):
+        """
+        ip -- IP address of this neighbor
+        iface -- Logical interface this neighbor was heard on
+        seq -- Current sequence number we have received from this neighbor
+        holdtime -- The neighbor's holdtime (may be different than local RTP's)
+        rtphdr -- The RTP header class to use
+        log -- A log function
+        dropfunc -- The function to call if this neighbor should be dropped
+        make_pkt -- A function that will generate an RTP packet
+        sendfunc -- A function to call every time a packet is (re)transmitted
+        """
         self.iface = iface
         self.holdtime = holdtime
         self.ip = ipaddr.IPv4Address(ip)
-        self.seq = seq
-        self.ack = 0
-        self.reply_pending = False
         self._queue = list()
-        self.state = self.STATE_PENDING
+        self._state = self.STATE_UP
+        self._state_receive = self._pending_receive
         self.last_heard = time.time()
+        self._cr_mode = False
+        self._rtphdr = rtphdr
+        self._dropfunc = dropfunc
+        self._drop_event = reactor.callLater(self.holdtime, self._dropfunc,
+                                             self)
+        self.log = log
+        self._make_pkt = make_pkt
+        self._write = sendfunc
 
-    def popmsg(self):
-        """Pop an RTP message off of the transmission queue."""
+        # The next ack number we should send to this neighbor. Not the same
+        # as seq_to because this will change to 0 after we send an ack.
+        self.next_ack = 0
+
+        # XXX Support non-zero port
+        self.port = 0
+
+        # XXX Update to a variable retransmit timer
+        self._retransmit_timer = .2
+        self._max_retransmit_seconds = 5
+
+        # seq_to is the last non-zero sequence number we sent to this neighbor
+        self.seq_to = 0
+
+        # seq_from is the last sequence number we received from this neighbor
+        self.seq_from = seq
+
+    def queue_full(self):
+        """Returns True if the transmit queue is full, otherwise returns
+        False."""
+        return len(self._queue) != 0
+
+    def receive(self, hdr, tlvs, src):
+        """Deals with updating last heard time and processing ACKs.
+        Sends to PENDING or 
+
+        Returns one of:
+            RTPNeighbor.PROCESS if the packet should be processed by the upper
+                                layer (as far as RTP is concerned)
+            RTPNeighbor.DROP if the packet should be dropped
+            RTPNeighbor.INIT if this neighbor needs to be initialized
+            RTPNeighbor.NEW_ADJACENCY if the neighbor transitioned to UP"""
+        # Don't receive if the packet requires CR mode and we are not in it.
+        if (hdr.flags & self._rtphdr.FLAG_CR) and \
+           not self._cr_mode:
+            self.log.debug5("CR flag set and we are not in CR mode. Drop "
+                            "packet.")
+            return self.DROP
+
+        # This will cause last heard to be updated when we receive
+        # an ACK in addition to when we receive a hello. In reality that's
+        # probably fine, but maybe not technically expected behavior per the
+        # spec.
+        if hdr.opcode == self._rtphdr.OPC_HELLO:
+            self._update_last_heard()
+        return self._state_receive(hdr, tlvs)
+
+    def _update_last_heard(self):
+        self.last_heard = time.time()
+        self._drop_event = self._drop_event.reset(self.holdtime)
+
+    def _pending_receive(self, hdr, tlvs):
+        # Look for an update packet with init flag set to transition to UP.
+        if hdr.opcode == self._rtphdr.OPC_HELLO:
+            self.log.debug5("Hello received. Do init.")
+            self._update_last_heard()
+            return self.INIT
+        elif hdr.opcode == self._rtphdr.OPC_UPDATE:
+            if hdr.flags & self._rtphdr.FLAG_INIT:
+                self.log.debug5("Init received. Bringing adjacency up.")
+                self._state = self.STATE_UP
+                self._state_receive = self._up_receive
+                self.next_ack = hdr.seq
+                return self.NEW_ADJACENCY
+        return self.DROP
+
+    def _up_receive(self, hdr, tlvs):
+        # In the UP state, request an ACK for anything that we receive.
+        # If hdr.seq was 0, then we won't send an ack (see how RTP.receive
+        # handles it).
+        self.next_ack = hdr.seq
+        if hdr.seq == self._seq_from:
+            # We already received this packet, but our ack was dropped. Ack
+            # but don't process.
+            self.log.debug5("Received dupe packet, seq {}".format(hdr.seq))
+            return self.DROP
+        self._seq_from = hdr.seq
+        if hdr.ack:
+            if hdr.ack == self.peekrtp().hdr.seq:
+                self._poprtp()
+                self._retransmit_event.cancel()
+                nextmsg = self.peekrtp()
+                if nextmsg:
+                    self._retransmit(time.time())
+
+        # XXX This assumes that there is not a case where a neighbor will send
+        # us an ack that is not for the last message that we sent. Obviously
+        # this can be done with a packet crafter, if nothing else, so we
+        # should think of the correct behavior here. (Just drop it?
+        # Re-send current msg? We don't have older messages anymore.) Currently
+        # we just ignore that an ack was sent if it's not for the current
+        # packet on the queue.
+
+        return self.PROCESS
+
+    def schedule_multicast_retransmission(self, pkt):
+        """Schedule the retransmission of a multicast packet as a unicast."""
+        self._pushrtp(pkt)
+
+    def send(self, opcode, tlvs, ack):
+        """Wrapper for ReliableTransportProtocol.__send_rtp_unicast.
+        opcode -- The RTP opcode number to use
+        tlvs -- An iterable of TLVs to send
+        ack -- If the packet requires an ack or not
+
+        Note that if you are using RTP for sequencing and acknowledgements,
+        ack needs to be set to True. If ack is set to False, RTP does not
+        set ack/seq values in the RTP header, which means this packet
+        effectively behaves like UDP.
+        """
+        pkt = self._make_pkt(opcode, tlvs, ack)
+        if not ack:
+            self._write(self, pkt)
+        else:
+            self._pushrtp(pkt)
+
+    def _poprtp(self):
+        """Pop an RTP packet off of the transmission queue and return it,
+        or return None if there are no messages enqueued."""
         try:
             return heappop(self._queue)
         except IndexError:
             return None
 
-    def pushmsg(self, msg):
-        """Push an RTP message onto the transmission queue."""
-        return heappush(self._queue, msg)
+    def _pushrtp(self, pkt):
+        """Push an RTP packet onto the transmission queue. This should only
+        be used for packets that require an acknowledgement."""
+        if not self.peekrtp():
+            self._seq_to = self._peekrtp().hdr.seq
+            self._retransmit_event = reactor.callLater(self._retransmit_timer,
+                                                self._retransmit, time.time())
+        heappush(self._queue, pkt)
 
-    def peekmsg(self, msg):
-        """Return the RTP message that will be popped on the next popmsg
-        call."""
+    def _retransmit(self, init_time):
+        """Retransmit the current RTP packet.
+        init_time -- The time this was first called
+        """
+        self._write(self, self._peekrtp())
+
+        # If the next retransmit attempt will not exceed the max retrans time,
+        # then schedule another retransmission.
+        if init_time + self._max_retransmit_seconds < \
+                       time.time() + self._retransmit_timer:
+            self._retransmit_event = reactor.callLater(self._retransmit_timer,
+                                                self._retransmit, init_time)
+        else:
+            # XXX Shouldn't we drop the neighbor here? DUAL at least won't
+            # operate correctly if RTP simply drops sequenced messages. 
+            pass
+
+    def _peekrtp(self):
+        """Return the next RTP packet in the transmission queue without
+        removing it, or None if the queue is empty."""
         try:
             return self._queue[0]
         except IndexError:
             return None
+
+
+class RTPInterface(object):
+
+    """An RTP logical interface."""
+
+    def __init__(self, logical_iface, writefunc, rtphdr):
+        """
+        logical_iface -- The logical interface to use
+        writefunc -- The function to use when sending packets from this
+                     interface
+        """
+        self._neighbors = dict()
+        self.logical_iface = logical_iface
+        self._write = writefunc
+        self._rtphdr = rtphdr
+
+    def add_neighbor(self, neighbor):
+        """Add neighbor object to this interface."""
+        self._neighbors[neighbor.logical_iface.ip] = neighbor
+
+    def get_neighbor(self, ip):
+        """Get neighbor with the IP address 'ip'."""
+        try:
+            return self._neighbors[ip]
+        except KeyError:
+            return None
+
+    def del_neighbor(self, ip):
+        """Remove neighbor with IP 'ip' from this interface."""
+        self._neighbors.pop(ip, None)
+
+    def send(self, opcode, tlvs, ack):
+        """Send an RTP multicast from this interface.
+        opcode -- The opcode number to use in the RTP header
+        tlvs -- An iterable of TLVs to send
+        ack -- The packet requires an acknowledgment. If True, retransmissions
+               will be queued for all neighbors on this interface.
+        """
+        # Check if self.activated?
+        self._write(self, opcode, tlvs, ack)

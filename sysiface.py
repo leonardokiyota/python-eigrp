@@ -18,30 +18,31 @@
 # along with this program; if not, write to the Free Software 
 # Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
 
-import ipaddr
+import sys
 import subprocess
 import re
 import logging
 import logging.config
+
+import ipaddr
 
 class _System(object):
     """Abstract class for OS-specific functions. These are all the OS-specific
     methods that need to be overridden by a subclass in order to function on a
     different OS."""
 
-    def init_logging(self, log_config):
-        logging.config.fileConfig(log_config, disable_existing_loggers=True)
-        self.log = logging.getLogger("System")
+    def __init__(self, log_config=None):
+        """log_config -- The logging configuration file."""
+        if log_config:
+            self.init_logging(log_config)
+        self.update_interface_info()
+        self.loopback = "127.0.0.1"
         self.phy_ifaces = []
         self.logical_ifaces = []
 
-    def __init__(self, *args, **kwargs):
-        """Args:
-        log_config -- The logging configuration file."""
-        kwargs.setdefault("log_config", "logging.conf")
-        self.init_logging(kwargs["log_config"])
-        self.update_interface_info()
-        self.loopback = "127.0.0.1"
+    def init_logging(self, log_config):
+        logging.config.fileConfig(log_config, disable_existing_loggers=True)
+        self.log = logging.getLogger("System")
 
     def modify_route(self, rt):
         """Update the metric and nexthop address to a prefix."""
@@ -283,3 +284,10 @@ class LogicalInterface(object):
         self.ip = ipaddr.IPv4Network(ip) 
         self.activated = activated 
         self.metric = metric 
+
+if sys.platform == "linux2":
+    system = LinuxSystem()
+elif sys.platform == "win":
+    system = WindowsSystem()
+else:
+    raise(NotSupported("No support for platform %s." % sys.platform))
