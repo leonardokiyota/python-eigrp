@@ -20,9 +20,6 @@ class ReliableTransportProtocol(protocol.DatagramProtocol):
     """An implementation of the Reliable Transport Protocol and Neighbor
     Discovery/Recovery used with EIGRP."""
 
-    # XXX Change single underscore members/methods to double leading
-    # underscore for mangling
-
     def __init__(self, logger, multicast_ip, port=0, tlvclasses=None,
                  kvalues=None, rid=0, asn=0, hello_interval=5, hdrver=2):
         """logger -- The log object to use
@@ -209,15 +206,12 @@ class ReliableTransportProtocol(protocol.DatagramProtocol):
                 self.log.debug("Received unexpected opcode {} from "
                                "non-neighbor.".format(hdr.opcode))
                 return
-            if not self.__verify_neighbor_kvalues(hdr, tlvs):
-                self.log.debug("Neighbor failed verification.")
-                return
-            neighbor = self.__add_neighbor(addr, port, hdr)
+            neighbor = self.__add_neighbor(addr, port, iface, hdr)
             if not neighbor:
                 self.log.debug("Failed to add neighbor.")
                 return
 
-        neighbor_receive_status = neighbor.receive(addr, port, hdr, tlvs)
+        neighbor_receive_status = neighbor.receive(hdr, tlvs)
         if neighbor_receive_status == neighbor.PROCESS:
             self.log.debug5("Passing packet to upper layer for processing.")
             self.rtpReceived(neighbor, hdr, tlvs)
@@ -251,13 +245,14 @@ class ReliableTransportProtocol(protocol.DatagramProtocol):
                 return iface
         return None
 
-    def __add_neighbor(self, addr, port, hdr, iface):
+    def __add_neighbor(self, addr, port, iface, hdr):
         """Add a neighbor to the list of neighbors.
         Return the new neighbor object, or None on failure."""
         addr = ipaddr.IPv4Address(addr)
         found_iface = False
         for iface in self.__ifaces:
             if addr in iface.logical_iface.ip:
+                found_iface = True
                 break
         if not found_iface:
             self.log.debug("Preventing adjacency with non-link-local "
@@ -271,31 +266,14 @@ class ReliableTransportProtocol(protocol.DatagramProtocol):
                                self.log,
                                self.__rtp_lost_neighbor,
                                self.__make_pkt,
-                               self.__send_rtp_unicast)
+                               self.__send_rtp_unicast,
+                               [self.__k1,
+                                self.__k2,
+                                self.__k3,
+                                self.__k4,
+                                self.__k5])
         iface.neighbors.append(neighbor)
         return neighbor
-
-    def __verify_neighbor_kvalues(self, hdr, tlvs):
-        """Checks advertised kvalues against our own.
-        Returns True if we should continue processing, otherwise returns
-        False."""
-        for tlv in tlvs:
-            if tlv.type == tlv.TLVParam.type:
-                if tlv.param.k1 != self.__k1 or \
-                   tlv.param.k2 != self.__k2 or \
-                   tlv.param.k3 != self.__k3 or \
-                   tlv.param.k4 != self.__k4 or \
-                   tlv.param.k5 != self.__k5:
-                    self.log.debug("Kvalue mismatch between potential "
-                                   "neighbor. Neighbor kvalues: {}, {}, {}, "
-                                   "{}, {}".format(tlv.param.k1, tlv.param.k2, \
-                                   tlv.param.k3, tlv.param.k4, tlv.param.k5))
-                    return False
-                return True
-            else:
-                self.log.debug("Unexpected TLV type {} in "
-                               "HELLO.".format(tlv.type))
-                return False
 
     def __get_seq(self):
         self.__seq += 1
@@ -327,12 +305,12 @@ class ReliableTransportProtocol(protocol.DatagramProtocol):
             for neighbor in iface.neighbors:
                 # If neighbor has a full queue, add it to a seq tlv
                 if neighbor.queue_full():
-                    seq_ips.append(neighbor)
+                    seq_ips.append(str(neighbor.ip.packed))
                 # We only really need to copy the hdr since the tlvs won't
                 # change.
                 neighbor.schedule_multicast_retransmission(copy.deepcopy(pkt))
             if seq_ips:
-                self.__send_seq_tlv(iface, seq_ips)
+                self.__send_seq_tlv(iface, seq_ips, pkt.hdr.seq)
                 hdr.flags |= self.__rtphdr.FLAG_CR
         self.__send(pkt.pack(), self.__multicast_ip, self.__port,
                     iface.logical_iface.ip)
@@ -341,6 +319,23 @@ class ReliableTransportProtocol(protocol.DatagramProtocol):
         if src:
             self.setOutgoingInterface(src)
         self.transport.write(msg, (ip, port))
+
+    def __send_seq_tlv(self, iface, seq_ips, next_seq):
+        """Send a sequence TLV listing the given IP addresses, and a next
+        multicast sequence TLV listing.
+
+        iface -- The interface to send from
+        seq_ips -- An iterable of packed addresses to be included in the
+                   seq TLV listing
+        next_seq -- The next multicast sequence number
+        """
+        # Note: In Cisco IOS 12.4 (EIGRP ver 1.2), this is sent along with
+        # a parameters TLV (as in a periodic hello). It "should" be ok
+        # to not do that.
+        tlvs = [ tlv.TLVSeq(*seq_ips), \
+                 tlv.TLVMulticastSeq(next_seq)
+               ]
+        iface.send(self.__rtphdr.OPC_HELLO, tlvs, False)
 
     def __make_pkt(self, opcode, tlvs, ack, flags=0):
         """Generate an RTP packet.
@@ -356,6 +351,7 @@ class ReliableTransportProtocol(protocol.DatagramProtocol):
                            rid=self.__rid, asn=self.__asn)
         pkt = RTPPacket(hdr, tlvs)
         return pkt
+
 
 class RTPPacket(object):
     def __init__(self, hdr, fields):
@@ -469,7 +465,7 @@ class RTPNeighbor(object):
     NEW_ADJACENCY = 4
 
     def __init__(self, ip, iface, seq, holdtime, rtphdr, log, dropfunc,
-                 make_pkt, sendfunc):
+                 make_pkt, sendfunc, kvalues):
         """
         ip -- IP address of this neighbor
         iface -- Logical interface this neighbor was heard on
@@ -480,6 +476,7 @@ class RTPNeighbor(object):
         dropfunc -- The function to call if this neighbor should be dropped
         make_pkt -- A function that will generate an RTP packet
         sendfunc -- A function to call every time a packet is (re)transmitted
+        kvalues -- The k-values needed in order to form an adjacency
         """
         self.iface = iface
         self.holdtime = holdtime
@@ -496,6 +493,7 @@ class RTPNeighbor(object):
         self.log = log
         self._make_pkt = make_pkt
         self._write = sendfunc
+        self.update_kvalues(kvalues)
 
         # The next ack number we should send to this neighbor. Not the same
         # as seq_to because this will change to 0 after we send an ack.
@@ -514,12 +512,22 @@ class RTPNeighbor(object):
         # seq_from is the last sequence number we received from this neighbor
         self.seq_from = seq
 
+        self._next_multicast_seq = 0
+
+    def update_kvalues(self, kvalues):
+        self._k1 = kvalues[0]
+        self._k2 = kvalues[1]
+        self._k3 = kvalues[2]
+        self._k4 = kvalues[3]
+        self._k4 = kvalues[3]
+        self._k5 = kvalues[4]
+
     def queue_full(self):
         """Returns True if the transmit queue is full, otherwise returns
         False."""
         return len(self._queue) != 0
 
-    def receive(self, hdr, tlvs, src):
+    def receive(self, hdr, tlvs):
         """Deals with updating last heard time and processing ACKs.
         Sends to PENDING or 
 
@@ -529,20 +537,68 @@ class RTPNeighbor(object):
             RTPNeighbor.DROP if the packet should be dropped
             RTPNeighbor.INIT if this neighbor needs to be initialized
             RTPNeighbor.NEW_ADJACENCY if the neighbor transitioned to UP"""
-        # Don't receive if the packet requires CR mode and we are not in it.
-        if (hdr.flags & self._rtphdr.FLAG_CR) and \
-           not self._cr_mode:
-            self.log.debug5("CR flag set and we are not in CR mode. Drop "
-                            "packet.")
-            return self.DROP
+        # If we're not in CR mode, drop CR-enabled packets.
+        # If we are in CR mode, only accept CR-enabled packets if the RTP
+        # sequence number is what we were expecting.
+        if (hdr.flags & self._rtphdr.FLAG_CR):
+            if not self._cr_mode:
+                self.log.debug5("CR flag set and we are not in CR mode. "
+                                "Drop packet.")
+                return self.DROP
+            elif hdr.seq == self._next_multicast_seq:
+                self._cr_mode = False
+                self._next_multicast_seq = 0
 
-        # This will cause last heard to be updated when we receive
-        # an ACK in addition to when we receive a hello. In reality that's
-        # probably fine, but maybe not technically expected behavior per the
-        # spec.
+        # This will cause last_heard to be updated when we receive
+        # an ACK in addition to when we receive a periodic hello. In reality
+        # that's probably fine, but maybe not technically expected behavior
+        # per the spec.
         if hdr.opcode == self._rtphdr.OPC_HELLO:
-            self._update_last_heard()
+            if self._handle_hello_tlvs(hdr, tlvs) == False:
+                return self.DROP
         return self._state_receive(hdr, tlvs)
+
+    def _handle_hello_tlvs(self, hdr, tlvs):
+        """Handle TLVs that are contained within a hello packet.
+        Return True if the packet should be processed further, otherwise
+        return False."""
+        for tlv in tlvs:
+            if tlv.type == tlv.TLVSeq.TYPE:
+                self._handle_hello_seq_tlv(hdr, tlv)
+            elif tlv.type == tlv.TLVMulticastSeq.TYPE:
+                self._handle_hello_multicastseq_tlv(hdr, tlv)
+            elif tlv.type == tlv.TLVParam.TYPE:
+                if self._handle_hello_param_tlv(hdr, tlv) == False:
+                    return False
+        return True
+
+    def _handle_hello_param_tlv(self, hdr, tlv):
+        """Checks advertised kvalues against our own.
+        Returns True if we should continue processing, otherwise returns
+        False."""
+        if tlv.param.k1 != self._k1 or \
+           tlv.param.k2 != self._k2 or \
+           tlv.param.k3 != self._k3 or \
+           tlv.param.k4 != self._k4 or \
+           tlv.param.k5 != self._k5:
+            self.log.debug("Kvalue mismatch between potential "
+                           "neighbor. Neighbor kvalues: {}, {}, {}, "
+                           "{}, {}".format(tlv.param.k1, tlv.param.k2, \
+                           tlv.param.k3, tlv.param.k4, tlv.param.k5))
+            return False
+        self._update_last_heard()
+        return True
+
+    def _handle_hello_seq_tlv(self, hdr, tlv):
+        for addr in tlv.seq.addrs:
+            for iface in sys.logical_ifaces:
+                if iface.ip.packed == addr:
+                    self._cr_mode = False
+
+        self._cr_mode = True
+
+    def _handle_hello_multicastseq_tlv(hdr, tlv):
+        self._next_multicast_seq = tlv.multicastseq.seq
 
     def _update_last_heard(self):
         self.last_heard = time.time()
@@ -552,7 +608,6 @@ class RTPNeighbor(object):
         # Look for an update packet with init flag set to transition to UP.
         if hdr.opcode == self._rtphdr.OPC_HELLO:
             self.log.debug5("Hello received. Do init.")
-            self._update_last_heard()
             return self.INIT
         elif hdr.opcode == self._rtphdr.OPC_UPDATE:
             if hdr.flags & self._rtphdr.FLAG_INIT:
@@ -694,4 +749,5 @@ class RTPInterface(object):
                will be queued for all neighbors on this interface.
         """
         # Check if self.activated?
+        # Stats (multicast packets sent)?
         self._write(self, opcode, tlvs, ack)

@@ -5,8 +5,8 @@ import ipaddr
 
 
 class ValueMetaclass(type):
-    """Metaclass for values in the TLV.
-    Assigns big-endian byte ordering to the format string, calculates the
+    """Convenience metaclass for values in the TLV.
+    Forces the format string to network byte ordering, calculates the
     format length (LEN), and assigns a brief NAME attribute
     based on the class name."""
     def __init__(cls, name, bases, dct):
@@ -18,13 +18,15 @@ class ValueMetaclass(type):
 
 
 class ValueBase(object):
-    """Base class for the "value" section of a TLV.
+    """Base class for the "value" section of a TLV. This is primarily for
+    fixed-length TLVs.
 
     Derived classes should have FIELDS, FORMAT, and LEN class attributes if
     they want to use ValueBase's generic pack/unpack functions.
     FIELDS should be a list of strings describing the fields within the value.
     FORMAT is the format to be used with struct.pack/unpack.
-    LEN is the return value of struct.calcsize(FORMAT).
+    LEN is the return value of struct.calcsize(FORMAT). Classes that inherit
+        from ValueBase will have this attribute set by the ValueMetaclass.
 
     Derived classes may also have to override the (un)pack functions if they
     have non-scalar fields or fields that require extra processing after
@@ -38,15 +40,24 @@ class ValueBase(object):
         if kwargs and args:
             raise(ValueError("Either args or kwargs are expected, not both."))
         if "raw" in kwargs:
-            for k, v in map(None, self._get_public_fields(),
-                            self.unpack(kwargs["raw"])):
-                setattr(self, k, v)
+            self._parse_kwargs(kwargs)
         elif args:
-            for k, v in map(None, self.FIELDS, args):
-                setattr(self, k, v)
+            self._parse_args(args)
         else:
-            raise(ValueError("One of args or kwargs is expected."))
+            raise(ValueError("One of args or kwargs['raw'] is expected."))
         self._packed = None
+
+    def _parse_kwargs(self, kwargs):
+        """Override in subclass if different parsing is needed."""
+        for k, v in map(None, self._get_public_fields(),
+                        self.unpack(kwargs["raw"])):
+            setattr(self, k, v)
+
+    def _parse_args(self, args):
+        """Parse args and assign class variables based on the names in
+        self.FIELDS. Override in subclass if different parsing is needed."""
+        for k, v in map(None, self.FIELDS, args):
+            setattr(self, k, v)
 
     def _get_public_fields(self):
         """Get public class fields. Override in subclass if this should
@@ -59,10 +70,12 @@ class ValueBase(object):
         return self.FIELDS
 
     def getlen(self):
+        """Get the format length. Override in subclass if this should return
+        something other than self.LEN."""
         return self.LEN
 
     def pack(self):
-        """Return the binary stresentation of this object."""
+        """Return the binary representation of this object."""
         if not self._packed:
             self._packed = struct.pack(self.FORMAT,
                        *[getattr(self, f) for f in self._get_private_fields()])
@@ -215,6 +228,78 @@ class ValueParam(ValueBase):
     FORMAT = "BBBBBxH"
 
 
+class ValueSeq(ValueBase):
+
+    """A sequence value for the sequence TLV. Stores a list of address strings
+    in binary form. ValueSeq does not know how to interpret the addresses
+    (i.e. it doesn't know if they are IPv4, IPv6, or something else)."""
+
+    ADDRLEN_FMT = "B"
+    ADDRLEN_FMT_SIZE = struct.calcsize(ADDRLEN_FMT)
+    MAX_ADDR_SIZE = (1 << (8 * ADDRLEN_FMT_SIZE)) - 1
+
+    def __init__(self, *args, **kwargs):
+        super(ValueBase, self).__thisclass__.__init__(self, *args, **kwargs)
+        self.addrs = list()
+
+    def _parse_kwargs(self, kwargs):
+        self.addrs = self.unpack(kwargs["raw"])
+
+    def _parse_args(self, args):
+        # The addrlen field is derived from len(addr)
+        for addr in args:
+            self.add_addr(addr)
+
+    def add_addr(self, addr):
+        if len(addr) > MAX_ADDR_SIZE:
+            raise(ValueError("Address length exceeds max address size."))
+        self.addrs.append(addr)
+
+    def pack(self):
+        if not self._packed:
+            # Only assign to self._packed once because parent's
+            # __setattr__ will clear self._packed every time it is modified.
+
+            # For every addr in self.addrs:
+            #   Get the length and insert
+            #  get the length of the 
+            packed = ""
+            for addr in self.addrs:
+                packed += struct.pack(self.ADDRLEN_FMT, len(addr))
+                packed += addr
+            self._packed = packed
+        return self._packed
+
+    def unpack(self, raw):
+        offset = 0
+        rawlen = len(raw)
+        seq_addrs = list()
+
+        # Save off addresses until there is no more data.
+        # Addresses are in binary and could be any length, though
+        # typical lengths are 4 for IPv4 and 16 for IPv6. We'll support
+        # addresses of any length here.
+        while offset < rawlen:
+            size = struct.unpack_from(addrlen_fmt, raw, offset)
+            offset += addrlen_fmt_size
+            seq_addrs.append(struct.unpack_from(raw, "%ss" % size, offset))
+            offset += size
+        return seq_addrs
+
+    def getlen(self):
+        total_len = self.ADDRLEN_FMT_SIZE * len(self.addrs)
+        for addr in self.addrs:
+            total_len += len(addr)
+        return total_len
+
+    def __str__(self):
+        return type(self).__name__ + "(%s addresses)" % len(self.addrs)
+
+
+class ValueMulticastSeq(ValueBase):
+    FIELDS = [ "seq" ]
+    FORMAT = "I"
+
 
 class TLVBase(object):
     """Base class for EIGRP TLVs."""
@@ -234,18 +319,25 @@ class TLVBase(object):
         if args and kwargs:
             raise(ValueError("Either args or kwargs is expected, not both."))
         if "raw" in kwargs:
-            hdr, values = self.unpack(kwargs["raw"])
-            for valclass, instance in map(None, self.VALUES, values):
-                setattr(self, valclass.NAME, instance)
+            self._parse_kwargs(kwargs)
         elif args:
-            index = 0
-            for valclass in self.VALUES:
-                nargs = len(valclass.FIELDS)
-                setattr(self, valclass.NAME,
-                        valclass(*args[index:index+nargs]))
-                index += nargs
+            self._parse_args(arg)
         else:
-            raise(ValueError("One of args or kwargs is expected."))
+            raise(ValueError("One of args or kwargs['raw'] is expected."))
+
+    def _parse_kwargs(self, kwargs):
+        """Override in subclass to parse kwargs for a TLV differently."""
+        hdr, values = self.unpack(kwargs["raw"])
+        for valclass, instance in map(None, self.VALUES, values):
+            setattr(self, valclass.NAME, instance)
+
+    def _parse_args(self, args):
+        """Override in subclass to parse args for a TLV differently."""
+        index = 0
+        for valclass in self.VALUES:
+            nargs = len(valclass.FIELDS)
+            setattr(self, valclass.NAME, valclass(*args[index:index+nargs]))
+            index += nargs
 
     def getlen(self):
         totallen = 0
@@ -294,7 +386,7 @@ class TLVBase(object):
 
     def unpack(self, raw):
         hdr = self.unpackhdr(raw)
-        values = self.unpackvalues(raw[self.HDR_LEN:])
+        values = self.unpackvalues(raw[self.HDR_LEN:self.HDR_LEN+self.len])
         return hdr, values
 
     @staticmethod
@@ -315,9 +407,8 @@ class TLVAuth(TLVBase):
 
 
 class TLVSeq(TLVBase):
-    # TODO
     TYPE   = TLVBase.PROTO_GENERIC | 3
-    VALUES = [ ]
+    VALUES = [ ValueSeq ]
 
 
 class TLVVersion(TLVBase):
@@ -329,7 +420,7 @@ class TLVVersion(TLVBase):
 class TLVMulticastSeq(TLVBase):
     # TODO
     TYPE   = TLVBase.PROTO_GENERIC | 5
-    VALUES = [ ]
+    VALUES = [ ValueMulticastSeq ]
 
 
 class TLVPeerInfo(TLVBase):
