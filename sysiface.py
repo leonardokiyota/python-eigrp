@@ -21,8 +21,7 @@
 import sys
 import subprocess
 import re
-import logging
-import logging.config
+import util
 
 import ipaddr
 
@@ -31,18 +30,14 @@ class _System(object):
     methods that need to be overridden by a subclass in order to function on a
     different OS."""
 
-    def __init__(self, log_config=None):
-        """log_config -- The logging configuration file."""
-        if log_config:
-            self.init_logging(log_config)
-        self.update_interface_info()
+    def __init__(self):
         self.loopback = "127.0.0.1"
-        self.phy_ifaces = []
-        self.logical_ifaces = []
+        self.update_interface_info()
+        self._rule_installed = False
 
-    def init_logging(self, log_config):
-        logging.config.fileConfig(log_config, disable_existing_loggers=True)
-        self.log = logging.getLogger("System")
+    def init_routing(self):
+        """Do anything related to starting routing on the system."""
+        pass
 
     def modify_route(self, rt):
         """Update the metric and nexthop address to a prefix."""
@@ -105,8 +100,12 @@ class WindowsSystem(_System):
     ROUTE_DEL = CMD_BASE % {"action": "delete"} + OPTS_BASE
     ROUTE_ADD = CMD_BASE % {"action": "add"} + OPTS_BASE + " %(nh)s metric %(metric)d"
 
-    def __init__(self, *args, **kwargs):
-        super(_System, self).__thisclass__.__init__(self, *args, **kwargs)
+    def init_routing(self):
+        # XXX This should also handle:
+        # Check if ip routing is already enabled
+        # If yes, do nothing
+        # If no, enable it, and set a flag to disable routing again in cleanup
+        pass
 
     def cleanup(self):
         pass
@@ -172,6 +171,7 @@ class WindowsSystem(_System):
                 continue
             yield (parsed_network.ip.exploded, parsed_network.netmask.exploded)
 
+
 class LinuxSystem(_System):
     """The Linux system interface."""
 
@@ -189,18 +189,25 @@ class LinuxSystem(_System):
             platform"""
         super(_System, self).__thisclass__.__init__(self, *args, **kwargs)
 
-        self.table = table
-        self.priority = priority
+        if not (0 < table < 255):
+            raise(ValueError)
+        if not (0 < priority < 32767):
+            raise(ValueError)
 
-        if self.table > 255 or self.table < 0:
-            raise(ValueError)
-        if self.priority > 32767 or self.priority < 0:
-            raise(ValueError)
+        self._table = table
+        self._priority = priority
+
+    def init_routing(self):
+        # XXX This should also handle:
+        # Check if ip routing is already enabled
+        # If yes, do nothing
+        # If no, enable it, and set a flag to disable routing again in cleanup
         self._install_rule()
 
     def _install_rule(self):
+        self._rule_installed = True
         cmd = [self.IP_CMD] + ("rule add priority %d table %d" % \
-               (self.priority, self.table)).split()
+               (self._priority, self._table)).split()
         try:
             output = subprocess.check_output(cmd, stderr=subprocess.STDOUT)
         except subprocess.CalledProcessError:
@@ -208,7 +215,7 @@ class LinuxSystem(_System):
 
     def _uninstall_rule(self):
         cmd = [self.IP_CMD] + ("rule del priority %d table %d" % \
-               (self.priority, self.table)).split()
+               (self._priority, self._table)).split()
         try:
             output = subprocess.check_output(cmd, stderr=subprocess.STDOUT)
         except subprocess.CalledProcessError:
@@ -238,7 +245,7 @@ class LinuxSystem(_System):
 
     def uninstall_route(self, net, preflen):
         cmd = [self.IP_CMD] + ("route del %s/%s table %d" % \
-               (net, preflen, self.table)).split()
+               (net, preflen, self._table)).split()
         try:
             output = subprocess.check_output(cmd, stderr=subprocess.STDOUT)
         except subprocess.CalledProcessError:
@@ -246,7 +253,7 @@ class LinuxSystem(_System):
 
     def install_route(self, net, preflen, metric, nexthop):
         cmd = [self.IP_CMD] + ("route add %s/%s via %s metric %d table %d" % \
-               (net, preflen, nexthop, metric, self.table)).split()
+               (net, preflen, nexthop, metric, self._table)).split()
         try:
             output = subprocess.check_output(cmd, stderr=subprocess.STDOUT)
         except subprocess.CalledProcessError:
@@ -269,7 +276,8 @@ class LinuxSystem(_System):
 
     def cleanup(self):
         """Perform any necessary system cleanup."""
-        self._uninstall_rule()
+        if self._rule_installed:
+            self._uninstall_rule()
 
 
 class PhysicalInterface(object):
@@ -279,15 +287,22 @@ class PhysicalInterface(object):
  
  
 class LogicalInterface(object):
-    def __init__(self, phy_iface, ip, metric=1, activated=False): 
+    def __init__(self, phy_iface, ip, metric=1): 
         self.phy_iface = phy_iface 
         self.ip = ipaddr.IPv4Network(ip) 
-        self.activated = activated 
         self.metric = metric 
 
-if sys.platform == "linux2":
-    system = LinuxSystem()
-elif sys.platform == "win":
-    system = WindowsSystem()
-else:
-    raise(NotSupported("No support for platform %s." % sys.platform))
+
+class SystemFactory(object):
+    def __init__(self, *args, **kwargs):
+        self.args = args
+        self.kwargs = kwargs
+        if sys.platform == "linux2":
+            self.system = LinuxSystem
+        elif sys.platform == "win":
+            self.system = WindowsSystem
+        else:
+            raise(NotSupported("No support for platform %s." % sys.platform))
+
+    def build(self, *args, **kwargs):
+        return self.system(*args, **kwargs)

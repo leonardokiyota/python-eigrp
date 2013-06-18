@@ -56,7 +56,7 @@ class ValueBase(object):
     def _parse_args(self, args):
         """Parse args and assign class variables based on the names in
         self.FIELDS. Override in subclass if different parsing is needed."""
-        for k, v in map(None, self.FIELDS, args):
+        for k, v in map(None, self._get_public_fields(), args):
             setattr(self, k, v)
 
     def _get_public_fields(self):
@@ -321,7 +321,7 @@ class TLVBase(object):
         if "raw" in kwargs:
             self._parse_kwargs(kwargs)
         elif args:
-            self._parse_args(arg)
+            self._parse_args(args)
         else:
             raise(ValueError("One of args or kwargs['raw'] is expected."))
 
@@ -364,10 +364,10 @@ class TLVBase(object):
         return packed + ("\x00" * padlen)
 
     def packhdr(self):
-        return struct.pack(self.HDR_FORMAT, self.type, self.len)
+        return struct.pack(self.HDR_FORMAT, self.type, self.getlen())
 
     @staticmethod
-    def unpackhdr(self, raw):
+    def unpackhdr(raw):
         return struct.unpack(TLVBase.HDR_FORMAT, raw[:TLVBase.HDR_LEN])
 
     def unpackvalues(self, raw):
@@ -386,7 +386,7 @@ class TLVBase(object):
 
     def unpack(self, raw):
         hdr = self.unpackhdr(raw)
-        values = self.unpackvalues(raw[self.HDR_LEN:self.HDR_LEN+self.len])
+        values = self.unpackvalues(raw[self.HDR_LEN:])
         return hdr, values
 
     @staticmethod
@@ -459,21 +459,21 @@ class TLVFactory(object):
                   hdr_unpacker. It does seem silly for this to be something
                   other than 0 given the order of words in the name "TLV",
                   but it's an option."""
-        self.tlvs = dict()
+        self._tlvs = dict()
         if tlvclasses:
             self.register_tlvs(tlvclasses)
         self._unpack_hdr = hdr_unpacker
         self._typeindex = typeindex
 
-    def register_tlvs(tlvclasses):
+    def register_tlvs(self, tlvclasses):
         try:
             iter(tlvclasses)
         except TypeError:
             tlvclasses = list(tlvclasses)
         for tlv in tlvclasses:
-            if tlv.TYPE in self.tlvs:
+            if tlv.TYPE in self._tlvs:
                 raise(ValueError("TLV type %d already registered." % tlv.TYPE))
-            self.tlvs[tlv.TYPE] = tlv
+            self._tlvs[tlv.TYPE] = tlv
 
     def build_all(self, raw):
         """Generator to yield all parsed TLVs from raw data."""
@@ -487,9 +487,7 @@ class TLVFactory(object):
     def build(self, raw):
         """Returns one TLV parsed from raw data."""
         try:
-            _type = self.unpack_hdr(raw)[self._typeindex]
+            _type = self._unpack_hdr(raw)[self._typeindex]
             return self._tlvs[_type](raw=raw)
-        except struct.error:
-            raise
         except KeyError:
             raise(ValueError("Unknown type in TLV: %d" % _type))

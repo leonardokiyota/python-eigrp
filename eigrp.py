@@ -40,98 +40,38 @@ import rtp
 
 class EIGRP(rtp.ReliableTransportProtocol):
 
-    DEFAULT_K_VALUES = [ 1, 74, 1, 0, 0 ]
-    MC_IP = "224.0.0.10"
+    DEFAULT_KVALUES = [ 1, 0, 1, 0, 0 ]
 
-    def __init__(self, rid, asn, routes, import_routes, requested_ifaces,
-                 log_config, admin_port, kvalues=None, hello_interval=5,
-                 hdrver=2):
+    def __init__(self, requested_ifaces, routes=[], import_routes=False,
+                 admin_port=None, *args, **kwargs):
         """An EIGRP implementation based on Cisco's draft informational RFC
         located here:
 
         http://www.ietf.org/id/draft-savage-eigrp-00.txt
 
-        rid -- The router ID to use
-        asn -- The autonomous system number
+        requested_ifaces -- Iterable of IP addresses to send from
         routes -- Iterable of routes to import
         import_routes -- Import routes from the kernel (True or False)
-        requested_ifaces -- Iterable of IP addresses to send from
         log_config -- Configuration filename
         admin_port -- The TCP port to bind to the administrative interface
                       (not implemented)
-        kvalues -- Iterable of K-value weights. Indexes are mapped to K1
-                    through K5 (index 0 -> K1). If None, use defaults.
-        hello_interval -- The hello interval. Also influences holdtime.
-        hdrver -- Version of the RTP header to use. Only 2 is supported.
         """
-        asn_rid_err_msg = "%s must be a positive number less than 65536."
-        if not isinstance(rid, int):
-            raise(TypeError(asn_rid_err_msg % "Router ID"))
-        if not (0 <= rid < 65536):
-            raise(ValueError(asn_rid_err_msg % "Router ID"))
-        if not isinstance(asn, int):
-            raise(TypeError(asn_rid_err_msg % "AS Number"))
-        if not (0 <= asn < 65536):
-            raise(ValueError(asn_rid_err_msg % "AS Number"))
-        self._rid = rid
-        self._asn = asn
-        self._ht_multiplier = self.DEFAULT_HT_MULTIPLIER
-
-        # Holdtime must fit in a 16 bit field, so the hello interval could
-        # in theory be set to a max of 65535/HT_MULTIPLIER. Since this is
-        # measured in seconds, in reality it will be set much shorter.
-        max_hello_interval = 65535 / self._ht_multiplier
-        if not (1 <= hello_interval <= max_hello_interval):
-            raise(ValueError("hello_interval must be between 1 and %d" % \
-                             max_hello_interval))
-
-        self._hello_interval = hello_interval
-        self._holdtime = self._hello_interval * self._ht_multiplier
-
-        if not kvalues or \
-           len(kvalues) != 5:
-            raise(ValueError("Exactly 5 K-values must be present."))
-        try:
-            for k in kvalues:
-                if not (0 <= k <= 255):
-                    raise(ValueError("Each kvalue must be between 0 and 255."))
-        except TypeError:
-            raise(TypeError("kvalues must be an iterable."))
-        if not sum(kvalues):
-            raise(ValueError("At least one kvalue must be non-zero."))
-        self._k1 = kvalues[0]
-        self._k2 = kvalues[1]
-        self._k3 = kvalues[2]
-        self._k4 = kvalues[3]
-        self._k5 = kvalues[4]
-
-        if hdrver == 2:
-            self._rtphdr = RTPHeader2
-        else:
-            raise(ValueError("Unsupported header version: %d" % hdrver))
-
-        self._init_logging(log_config)
-        self._sys = sysiface.system
-        self._sys.init_logging(log_config)
+        rtp.ReliableTransportProtocol.__init__(self, *args, **kwargs)
+        if self._k1 == 0 and \
+           self._k2 == 0 and \
+           self._k3 == 0 and \
+           self._k4 == 0 and \
+           self._k5 == 0:
+            self._k1 = self.DEFAULT_KVALUES[0]
+            self._k2 = self.DEFAULT_KVALUES[1]
+            self._k3 = self.DEFAULT_KVALUES[2]
+            self._k4 = self.DEFAULT_KVALUES[3]
+            self._k5 = self.DEFAULT_KVALUES[4]
 
         self._register_op_handlers()
-        self._build_hello_pkt()
         for iface in requested_ifaces:
             self.activate_iface(iface)
-        self._fieldfactory = TLVFactory()
-        self._neighbors = list()
-        self._seq = 1
-        self._crmode = False
         #eigrpadmin.run(self, port=admin_port)
-
-    def activate_iface(self, req_iface):
-        """Enable EIGRP to send from the specified interface."""
-        for sys_iface in self._sys.logical_ifaces:
-            if req_iface == sys_iface.ip.ip.exploded:
-                sys_iface.activated = True
-                return
-        raise(ValueError("Requested IP %s is unusable. (Is it assigned to this"
-                         " machine on a usable interface?)" % req_iface))
 
     def _init_logging(self, log_config):
         # debug1 is less verbose, debug5 is more verbose.
@@ -266,11 +206,6 @@ class EIGRP(rtp.ReliableTransportProtocol):
                            " second(s)." % nextcall)
             self._next_holdtime_check = now + nextcall
             reactor.callLater(nextcall, self._check_neighbor_holdtimes)
-
-    def _del_neighbor(self, neighbor):
-        # XXX Delete routes etc.
-        self.log.debug("Deleting neighbor: %s" % neighbor)
-        self._neighbors.remove(neighbor)
 
     def _eigrp_op_handler_siaquery(self, addr, hdr, data):
         self.log.debug("Processing SIAQUERY")
