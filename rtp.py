@@ -376,8 +376,8 @@ class ReliableTransportProtocol(protocol.DatagramProtocol):
             if not neighbor:
                 self.log.debug("Failed to add neighbor.")
                 return
-#            self.__send_hello(neighbor.iface)
-#            self.__send_init(neighbor)
+            self.__send_hello(neighbor.iface)
+            self.__send_init(neighbor)
 
         self.log.debug5("Header: {}".format(hdr))
         for tlv in tlvs:
@@ -390,9 +390,9 @@ class ReliableTransportProtocol(protocol.DatagramProtocol):
         elif neighbor_receive_status == neighbor.DROP:
             self.log.debug5("RTP stopped processing for this packet.")
         elif neighbor_receive_status == neighbor.INIT:
-            self.__send_hello(neighbor.iface)
-            self.__send_init(neighbor)
+            self.initReceived(neighbor)
         elif neighbor_receive_status == neighbor.NEW_ADJACENCY:
+            # XXX Probably don't need this, use InitReceived
             self.__rtp_found_neighbor(neighbor)
         else:
             raise(AssertionFailure("Unknown RTP Neighbor receive status: "
@@ -710,9 +710,10 @@ class RTPNeighbor(object):
 
     def _up_receive(self, hdr, tlvs):
         """Receive function that is used when the adjacency is UP."""
-        # In the UP state, request an ACK for anything that we receive.
-        # If hdr.seq was 0, then we won't send an ack (see how RTP.receive
-        # handles it).
+        # In the UP state, request that an ACK be sent for any sequenced
+        # packet that we receive.
+        # If self.next_ack is 0, then we won't send an ack (see how RTP.receive
+        # handles it), so it's ok if hdr.seq is 0 here.
         self.next_ack = hdr.seq
         if hdr.seq and \
            hdr.seq == self._seq_from:

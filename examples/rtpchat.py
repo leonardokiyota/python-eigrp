@@ -130,7 +130,7 @@ class RTPChat(rtp.ReliableTransportProtocol):
                 self._send_username(neighbor)
 
     def _update_username(self, neighbor, text):
-        neighbor._username = tlv.text
+        neighbor._username = text
         self._ui.update_username(neighbor)
 
     def _process_chat_msg(self, neighbor, text):
@@ -143,13 +143,18 @@ class RTPChat(rtp.ReliableTransportProtocol):
         neighbor.send(self._rtphdr.OPC_REPLY, tlvs, True)
 
     def _process_request_tlvs(self, neighbor, hdr, tlvs):
+        print("RTPCHAT Processing request.")
         for tlv in tlvs:
+            print("TLV type == {}, UserRequest == {}".format(tlv.type, TLVUserResponse.TYPE))
             if tlv.type == TLVUserResponse.TYPE:
                 self._update_username(neighbor, tlv.text)
 
     def _send_chat_msg(self, neighbor, text):
         tlvs = [TLVText(text)]
         self.neighbor.send(self._rtphdr.OPC_REPLY, tlvs, True)
+
+    def initReceived(self, neighbor):
+        self._request_username(neighbor)
 
     def foundNeighbor(self, neighbor):
         self._request_username(neighbor)

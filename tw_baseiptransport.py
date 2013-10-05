@@ -57,13 +57,50 @@ else:
 # seems to be safe.
 reactor_class = type(reactor)
 del sys.modules['twisted.internet.reactor']
-class ReactorWithIPTransport(reactor_class):
+class ExtendedReactor(reactor_class):
     def listenIP(self, port, protocol, interface='', maxPacketSize=8192, listenMultiple=False):
         p = IPTransport(port, protocol, interface, maxPacketSize, self, listenMultiple)
         p.startListening()
         return p
-reactor = ReactorWithIPTransport()
+
+    def listenNetlink(self, port, protocol, netlinkType, interface=1, maxPacketSize=8192, listenMultiple=False):
+        p = NetlinkPort(netlinkType, port, protocol, interface, maxPacketSize, self, listenMultiple)
+        p.startListening()
+        return p
+reactor = ExtendedReactor()
 installReactor(reactor)
+
+
+class NetlinkPort(udp.MulticastPort):
+    """A Twisted "Port" class used to communicate with netlink sockets."""
+
+    # TODO handle acks/retransmissions
+
+    addressFamily = socket.AF_NETLINK
+    socketType = socket.SOCK_RAW
+
+    NETLINK_ROUTE = 0
+
+    def __init__(self, netlinkType, *args, **kwargs):
+        """The netlinkType should be the netlink type, e.g. NETLINK_ROUTE.
+        Right now only NETLINK_ROUTE is supported.
+        """
+        if netlinkType != self.NETLINK_ROUTE:
+            raise(ValueError("Netlink type {} not "
+                             "supported.".format(netlinkType)))
+        self.netlinkType = netlinkType
+        udp.MulticastPort.__init__(self, *args, **kwargs)
+
+    def createInternetSocket(self):
+        s = socket.socket(self.addressFamily, self.socketType, self.netlinkType)
+        s.setblocking(0)
+        fdesc._setCloseOnExec(s.fileno())
+        if self.listenMultiple:
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            if hasattr(socket, "SO_REUSEPORT"):
+                s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+        return s
+
 
 # Open for suggestions on a name other than IPTransport. Other similar classes
 # in Twisted are UDPPort and TCPPort -- clearly IPPort isn't a better option.
