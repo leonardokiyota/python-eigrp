@@ -612,7 +612,7 @@ class RTPNeighbor(object):
         # If we're not in CR mode, drop CR-enabled packets.
         # If we are in CR mode, only accept CR-enabled packets if the RTP
         # sequence number is what we were expecting.
-        if (hdr.flags & self._rtphdr.FLAG_CR):
+        if hdr.flags & self._rtphdr.FLAG_CR:
             if not self._cr_mode:
                 self.log.debug5("CR flag set and we are not in CR mode. "
                                 "Drop packet.")
@@ -675,8 +675,9 @@ class RTPNeighbor(object):
         return True
 
     def _update_holdtime(self, holdtime):
+        self.log.debug5("Changing holdtime for neighbor {} to "
+                        "{}".format(self, holdtime))
         self._holdtime = holdtime
-        self._drop_event.reset(self._holdtime)
 
     def _handle_hello_seq_tlv(self, hdr, tlv):
         for addr in tlv.seq.addrs:
@@ -691,7 +692,7 @@ class RTPNeighbor(object):
 
     def _update_last_heard(self):
         self.last_heard = time.time()
-        self._drop_event = self._drop_event.reset(self._holdtime)
+        self._drop_event.reset(self._holdtime)
 
     def _pending_receive(self, hdr, tlvs):
         """Receive function that is used when the adjacency is PENDING."""
@@ -833,9 +834,9 @@ class RTPInterface(object):
         except KeyError:
             return None
 
-    def del_neighbor(self, ip):
-        """Remove neighbor with IP 'ip' from this interface."""
-        self._neighbors.pop(ip, None)
+    def del_neighbor(self, neighbor):
+        """Remove neighbor from this interface."""
+        self._neighbors.pop(neighbor.ip.exploded, None)
 
     def send(self, opcode, tlvs, ack):
         """Send an RTP multicast from this interface.

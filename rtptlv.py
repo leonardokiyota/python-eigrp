@@ -476,13 +476,15 @@ class TLVFactory(object):
             self._tlvs[tlv.TYPE] = tlv
 
     def build_all(self, raw):
-        """Generator to yield all parsed TLVs from raw data."""
+        """Build and return a list of all TLVs parsed from raw data."""
         index = 0
         rawlen = len(raw)
+        tlvs = list()
         while index < rawlen:
             tlv = self.build(raw[index:])
             index += tlv.getlen()
-            yield tlv
+            tlvs.append(tlv)
+        return tlvs
 
     def build(self, raw):
         """Returns one TLV parsed from raw data."""
