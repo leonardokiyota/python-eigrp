@@ -28,7 +28,7 @@ class _BaseRTPChatGUI(object):
     def receive_text(self, neighbor, text):
         """Called when a neighbor has sent us a text message."""
 
-    def update_username(self, neighbor):
+    def update_username(self, neighbor, text):
         """Called when we receive a new username for a neighbor. (Including
         when we first discover a neighbor and obtain its username.)"""
 
@@ -44,10 +44,12 @@ class RTPChatGtkGUI(_BaseRTPChatGUI):
 class ValueText(rtptlv.ValueBase):
     """Plain text data."""
 
+    FIELDS = [ "text" ]
+
     def __init__(self, *args, **kwargs):
+        self.text = ""
         super(rtptlv.ValueBase, self).__thisclass__.__init__(self, *args,
                                                              **kwargs)
-        self.text = ""
 
     def pack(self):
         return self.text
@@ -123,15 +125,21 @@ class RTPChat(rtp.ReliableTransportProtocol):
                                         TLVUserResponse])
 
     def _process_reply_tlvs(self, neighbor, hdr, tlvs):
+        self.log.debug5("RTPCHAT processing reply TLV")
         for tlv in tlvs:
             if tlv.type == TLVText.TYPE:
+                self.log.debug5("Receiving Text TLV.")
                 self._process_chat_msg(neighbor, tlv.text)
-            elif tlv.type == TLVUserRequest.TYPE:
-                self._send_username(neighbor)
+            elif tlv.type == TLVUserResponse.TYPE:
+                self.log.debug5("Receiving User Response TLV.")
+                self._update_username(neighbor, tlv.text.text)
+            else:
+                self.log.debug("Unknown reply TLV: {}".format(tlv))
 
     def _update_username(self, neighbor, text):
+        self.log.debug("Updating neighbor {} to use username {}".format(neighbor, text))
         neighbor._username = text
-        self._ui.update_username(neighbor)
+        self._ui.update_username(neighbor, text)
 
     def _process_chat_msg(self, neighbor, text):
         self._ui.receive_text(neighbor)
@@ -139,15 +147,17 @@ class RTPChat(rtp.ReliableTransportProtocol):
     def _send_username(self, neighbor):
         """Send our username to a neighbor."""
         tlvs = [TLVUserResponse(self._username)]
-        print "Sending our username ..."
+        self.log.debug5("Sending our username to neighbor {}...".format(neighbor))
         neighbor.send(self._rtphdr.OPC_REPLY, tlvs, True)
 
     def _process_request_tlvs(self, neighbor, hdr, tlvs):
-        print("RTPCHAT Processing request.")
+        self.log.debug5("RTPCHAT processing request.")
         for tlv in tlvs:
-            print("TLV type == {}, UserRequest == {}".format(tlv.type, TLVUserResponse.TYPE))
-            if tlv.type == TLVUserResponse.TYPE:
-                self._update_username(neighbor, tlv.text)
+            if tlv.type == TLVUserRequest.TYPE:
+                self.log.debug5("Receiving User Request TLV.")
+                self._send_username(neighbor)
+            else:
+                self.log.debug("Receiving unknown TLV type.")
 
     def _send_chat_msg(self, neighbor, text):
         tlvs = [TLVText(text)]
@@ -167,10 +177,13 @@ class RTPChat(rtp.ReliableTransportProtocol):
         pass
 
     def rtpReceived(self, neighbor, hdr, tlvs):
+        self.log.debug5("RTPCHAT received a message...")
         if hdr.opcode == self._rtphdr.OPC_REPLY:
             self._process_reply_tlvs(neighbor, hdr, tlvs)
         elif hdr.opcode == self._rtphdr.OPC_REQUEST:
             self._process_request_tlvs(neighbor, hdr, tlvs)
+        else:
+            self.log.debug("Received unknown opcode: {}".format(hdr.opcode))
 
     def run(self):
         reactor.listenIP(88, self)
