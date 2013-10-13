@@ -7,7 +7,7 @@ import ipaddr
 import copy
 import time
 import logging
-from heapq import heappush, heappop
+from collections import deque
 from twisted.internet import protocol
 import logging
 import logging.config
@@ -59,7 +59,7 @@ class ReliableTransportProtocol(protocol.DatagramProtocol):
         self._rid = rid
         self._asn = asn
         self.__ht_multiplier = self.DEFAULT_HT_MULTIPLIER
-        self.__seq = 1
+        self.__seq = 0
         self._multicast_ip = multicast_ip
         self._port = port
 
@@ -143,9 +143,8 @@ class ReliableTransportProtocol(protocol.DatagramProtocol):
         iface.send(self._rtphdr.OPC_HELLO, self.__hello_tlvs, False)
 
     def __send_init(self, neighbor):
-        pkt = self.__make_pkt(self._rtphdr.OPC_UPDATE, [], True,
-                              self._rtphdr.FLAG_INIT)
-        self.__send_rtp_unicast(neighbor, pkt)
+        neighbor.send(self._rtphdr.OPC_UPDATE, [], True,
+                      self._rtphdr.FLAG_INIT)
 
     def __update_hello_tlvs(self):
         """Called to create the hello packet's TLVs that should be sent at
@@ -170,6 +169,7 @@ class ReliableTransportProtocol(protocol.DatagramProtocol):
         neighbor.iface.del_neighbor(neighbor)
 
     def __send_explicit_ack(self, neighbor):
+        self.log.debug5("Sending explicit ACK.")
         hdr = self._rtphdr(opcode=self._rtphdr.OPC_HELLO, flags=0, seq=0,
                            ack=neighbor.next_ack, rid=self._rid,
                            asn=self._asn)
@@ -218,6 +218,7 @@ class ReliableTransportProtocol(protocol.DatagramProtocol):
         return neighbor
 
     def __get_seq(self):
+        # XXX Deal with sequence number wrapping.
         self.__seq += 1
         return self.__seq
 
@@ -226,7 +227,7 @@ class ReliableTransportProtocol(protocol.DatagramProtocol):
         neighbor -- The neighbor to send to
         pkt -- The RTP packet to send
         """
-        self.log.debug5("Sending unicast to {}: {}".format(neighbor.iface.logical_iface.ip.ip.exploded, pkt))
+        self.log.debug5("Sending unicast to {}: {}".format(neighbor.ip, pkt))
         pkt.hdr.ack = neighbor.next_ack
         neighbor.next_ack = 0
         msg = pkt.pack()
@@ -395,8 +396,8 @@ class ReliableTransportProtocol(protocol.DatagramProtocol):
             # XXX Probably don't need this, use InitReceived
             self.__rtp_found_neighbor(neighbor)
         else:
-            raise(AssertionFailure("Unknown RTP Neighbor receive status: "
-                                   "{}".format(neighbor_receive_status)))
+            assert False, "Unknown RTP Neighbor receive status: " \
+                          "{}".format(neighbor_receive_status)
 
         # If an ACK is needed and one wasn't sent by RTP.send (i.e. no reply
         # has been sent yet by upper layer), send an explicit ack.
@@ -548,7 +549,7 @@ class RTPNeighbor(object):
         """
         self.iface = iface
         self.ip = ipaddr.IPv4Address(ip)
-        self._queue = list()
+        self._queue = deque()
         self._state_receive = self._pending_receive
         self.last_heard = time.time()
         self._cr_mode = False
@@ -595,8 +596,9 @@ class RTPNeighbor(object):
         self._k5 = kvalues[4]
 
     def queue_full(self):
-        """Returns True if the transmit queue is full, otherwise returns
-        False."""
+        """Returns True if the transmit queue is full. There is a window of 1,
+        so if anything is in the queue it is considered full.
+        Otherwise returns False."""
         return len(self._queue) != 0
 
     def receive(self, hdr, tlvs):
@@ -609,6 +611,8 @@ class RTPNeighbor(object):
             RTPNeighbor.DROP if the packet should be dropped
             RTPNeighbor.INIT if this neighbor needs to be initialized
             RTPNeighbor.NEW_ADJACENCY if the neighbor transitioned to UP"""
+        self.next_ack = hdr.seq
+
         # If we're not in CR mode, drop CR-enabled packets.
         # If we are in CR mode, only accept CR-enabled packets if the RTP
         # sequence number is what we were expecting.
@@ -705,7 +709,6 @@ class RTPNeighbor(object):
             if hdr.flags & self._rtphdr.FLAG_INIT:
                 self.log.debug5("Init received. Bringing adjacency up.")
                 self._state_receive = self._up_receive
-                self.next_ack = hdr.seq
                 return self.NEW_ADJACENCY
         return self.DROP
 
@@ -719,32 +722,41 @@ class RTPNeighbor(object):
         if hdr.seq and \
            hdr.seq == self._seq_from:
             # We already received this packet, but our ack was dropped. Ack
-            # but don't process.
+            # but don't process. In some unexpected mode of operation,
+            # it's possible that we could receive SEQ x from this neighbor,
+            # then the neighbor rapidly increments its global SEQ number
+            # by talking to some other neighbor. When it sends us
+            # its next sequenced packet it has wrapped back to SEQ x
+            # and we drop and ack the packet. That would be wrong to do.
+            # Seems extremely unlikely for EIGRP, but could be more likely for
+            # other protocols built on RTP.
             self.log.debug5("Received dupe packet, seq {}".format(hdr.seq))
             return self.DROP
         self._seq_from = hdr.seq
         if hdr.ack:
-            if hdr.ack == self._peekrtp().hdr.seq:
+            curmsg = self._peekrtp()
+            if not curmsg:
+                # We got an ACK but we weren't waiting for an ACK.
+                # We should still let the upper layer process the packet.
+                self.log.debug("Received spurious ACK from neighbor {}. Header: {}".format(self, hdr))
+                return self.PROCESS
+            if hdr.ack == curmsg.hdr.seq:
+                self.log.debug5("Received ACK {} for pkt {}".format(hdr.ack, self._peekrtp()))
                 self._poprtp()
                 self._retransmit_event.cancel()
-                nextmsg = self._peekrtp()
-                if nextmsg:
+                if self._peekrtp():
                     self._retransmit(time.time())
-
-        # XXX This assumes that there is not a case where a neighbor will send
-        # us an ack that is not for the last message that we sent. Obviously
-        # this can be done with a packet crafter, if nothing else, so we
-        # should think of the correct behavior here. (Just drop it?
-        # Re-send current msg? We don't have older messages anymore.) Currently
-        # we just ignore that an ack was sent if it's not for the current
-        # packet on the queue.
+            else:
+                # We should still process the packet in this case.
+                self.log.debug5("Expected ACK for {}, but got "
+                                "{}.".format(curmsg.hdr.seq, hdr.ack))
         return self.PROCESS
 
     def schedule_multicast_retransmission(self, pkt):
         """Schedule the retransmission of a multicast packet as a unicast."""
         self._pushrtp(pkt)
 
-    def send(self, opcode, tlvs, ack):
+    def send(self, opcode, tlvs, ack, flags=0):
         """Wrapper for ReliableTransportProtocol.__send_rtp_unicast.
         opcode -- The RTP opcode number to use
         tlvs -- An iterable of TLVs to send
@@ -755,7 +767,7 @@ class RTPNeighbor(object):
         set ack/seq values in the RTP header, which means this packet
         effectively behaves like UDP.
         """
-        pkt = self._make_pkt(opcode, tlvs, ack)
+        pkt = self._make_pkt(opcode, tlvs, ack, flags)
         if not ack:
             self._write(self, pkt)
         else:
@@ -765,7 +777,7 @@ class RTPNeighbor(object):
         """Pop an RTP packet off of the transmission queue and return it,
         or return None if there are no messages enqueued."""
         try:
-            return heappop(self._queue)
+            return self._queue.pop()
         except IndexError:
             return None
 
@@ -774,14 +786,20 @@ class RTPNeighbor(object):
         be used for packets that require an acknowledgement."""
         if not self._peekrtp():
             self._seq_to = pkt.hdr.seq
+            self._write(self, pkt)
             self._retransmit_event = reactor.callLater(self._retransmit_timer,
                                                 self._retransmit, time.time())
-        heappush(self._queue, pkt)
+        self._queue.appendleft(pkt)
 
-    def _retransmit(self, init_time):
+    def _retransmit(self, init_time, first_call=True):
         """Retransmit the current RTP packet.
         init_time -- The time this was first called
+        first_call -- If this is the first time this function was called for
+                      the current packet. (Should always be True when called
+                      by anything other than this function.)
         """
+        if not first_call:
+            self.log.debug("Retransmitting: {}".format(self._peekrtp()))
         self._write(self, self._peekrtp())
 
         # If the next retransmit attempt will not exceed the max retrans time,
@@ -789,7 +807,7 @@ class RTPNeighbor(object):
         if init_time + self._max_retransmit_seconds > \
                        time.time() + self._retransmit_timer:
             self._retransmit_event = reactor.callLater(self._retransmit_timer,
-                                                self._retransmit, init_time)
+                                           self._retransmit, init_time, False)
         else:
             # XXX Shouldn't we drop the neighbor here? DUAL at least won't
             # operate correctly if RTP simply drops sequenced messages. 
@@ -798,8 +816,9 @@ class RTPNeighbor(object):
     def _peekrtp(self):
         """Return the next RTP packet in the transmission queue without
         removing it, or None if the queue is empty."""
+        # We append to the left side and pop from the right side.
         try:
-            return self._queue[0]
+            return self._queue[-1]
         except IndexError:
             return None
 

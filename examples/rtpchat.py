@@ -164,13 +164,14 @@ class RTPChat(rtp.ReliableTransportProtocol):
         self.neighbor.send(self._rtphdr.OPC_REPLY, tlvs, True)
 
     def initReceived(self, neighbor):
-        self._request_username(neighbor)
+        pass
 
     def foundNeighbor(self, neighbor):
         self._request_username(neighbor)
 
     def _request_username(self, neighbor):
         tlvs = [TLVUserRequest()]
+        self.log.debug5("Requesting username from neighbor {}".format(neighbor))
         neighbor.send(self._rtphdr.OPC_REQUEST, tlvs, True)
 
     def lostNeighbor(self, neighbor):
