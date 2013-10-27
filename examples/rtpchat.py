@@ -25,18 +25,22 @@ class _BaseRTPChatGUI(object):
     serves as a programming inteface that should be overriden by the actual
     GUI class."""
 
-    def __init__(self, sendfunc, quitfunc):
+    def __init__(self, sendfunc, quitfunc, autoreplyfunc):
         """sendfunc -- The function that the GUI should call when the
                        GUI has text to send.
            quitfunc -- A function to call when a user quits the application"""
         self._send = sendfunc
         self._quit = quitfunc
+        self._autoreply = autoreplyfunc
 
     def lost_neigbor(self, neighbor):
         """Called when a neighbor has gone away."""
 
     def receive_text(self, neighbor, text):
         """Called when a neighbor has sent us a text message."""
+
+    def receive_autoreply(self, neighbor, text):
+        """Called when a neighbor has sent us an autoreply message."""
 
     def update_username(self, neighbor, text):
         """Called when we receive a new username for a neighbor. (Including
@@ -55,7 +59,7 @@ class RTPChatTkinterGUI(_BaseRTPChatGUI):
         tksupport.install(self._root)
         self._root.protocol("WM_DELETE_WINDOW", self._confirm_quit)
         self._root.title("RTPChat Tkinter GUI")
-        self._root.geometry("575x685")
+        self._root.geometry("575x785")
 
         self._frame_main = Tkinter.Frame(self._root)
         self._frame_main.grid()
@@ -90,6 +94,15 @@ class RTPChatTkinterGUI(_BaseRTPChatGUI):
         self._btn_quit = Tkinter.Button(self._frame_main, text="Quit",
                                         command=self._confirm_quit)
         self._btn_quit.grid(row=4)
+
+        self._frame_autoreply = Tkinter.LabelFrame(self._frame_main,
+                                                   text="Auto-reply msg (if blank, auto-reply is disabled)")
+        self._frame_autoreply.grid()
+        self._var_autoreply = Tkinter.StringVar()
+        self._txt_autoreply = Tkinter.Entry(self._frame_autoreply,
+                                            textvariable=self._var_autoreply)
+        self._txt_autoreply.grid(row=2, column=1)
+
         self._write_local_msg("RTP Chat has started. Usage:")
         self._write_local_msg("When a neighbor RTP Chat client comes online, it will appear in the Neighbors list below.")
         self._write_local_msg("Click on a neighbor then type in the Input box to send them a message.")
@@ -126,7 +139,7 @@ class RTPChatTkinterGUI(_BaseRTPChatGUI):
         except IndexError:
             self._write_local_msg("You must select a neighbor to talk to before sending a message.")
             return
-            
+
         msg = self._var_input.get()
         self._send(neighbor, msg)
         self._write_local_msg("You told " + neighbor._username + ": \"" + \
@@ -135,8 +148,16 @@ class RTPChatTkinterGUI(_BaseRTPChatGUI):
         self._var_input.set('')
 
     def receive_text(self, neighbor, text):
-        print text.text
         self._write_local_msg(neighbor._username + " tells you: \"" + text.text + "\"")
+        autoreply_msg = self._var_autoreply.get()
+        if autoreply_msg:
+            self._autoreply(neighbor, autoreply_msg)
+            self._write_local_msg("You sent an auto-reply message to " + \
+                                  neighbor._username + ": \"" + \
+                                  autoreply_msg + "\"")
+
+    def receive_autoreply(self, neighbor, text):
+        self._write_local_msg(neighbor._username + " auto-replies to you: \"" + text.text + "\"")
 
     def update_username(self, neighbor, username):
         # Keep track of which neighbor is at each index in the
@@ -209,6 +230,11 @@ class TLVUserRequest(rtptlv.TLVBase):
         self.type = self.TYPE
 
 
+class TLVAutoReply(rtptlv.TLVBase):
+    TYPE   = PROTO_RTPCHAT | 4
+    VALUES = [ ValueText ]
+
+
 class RTPChat(rtp.ReliableTransportProtocol):
 
     """An example of an upper layer to RTP that is not EIGRP. Used to
@@ -222,13 +248,16 @@ class RTPChat(rtp.ReliableTransportProtocol):
         self.activate_iface(ip)
         if ui == self.GTK_UI:
             self._ui = RTPChatTkinterGUI(self._send_chat_msg,
-                                         reactor.stop)
+                                         reactor.stop,
+                                         self._send_autoreply)
         else:
             raise(ValueError("Unsupported GUI type: {}".format(ui)))
         self._username = username
         self._tlvfactory.register_tlvs([TLVText,
                                         TLVUserRequest,
-                                        TLVUserResponse])
+                                        TLVUserResponse,
+                                        TLVAutoReply,
+                                       ])
 
     def _process_reply_tlvs(self, neighbor, hdr, tlvs):
         self.log.debug5("RTPCHAT processing reply TLV")
@@ -236,6 +265,8 @@ class RTPChat(rtp.ReliableTransportProtocol):
             if tlv.type == TLVText.TYPE:
                 self.log.debug5("Receiving Text TLV.")
                 self._process_chat_msg(neighbor, tlv.text)
+            if tlv.type == TLVAutoReply.TYPE:
+                self._process_autoreply(neighbor, tlv.text)
             elif tlv.type == TLVUserResponse.TYPE:
                 self.log.debug5("Receiving User Response TLV.")
                 self._update_username(neighbor, tlv.text.text)
@@ -251,6 +282,9 @@ class RTPChat(rtp.ReliableTransportProtocol):
     def _process_chat_msg(self, neighbor, text):
         self._ui.receive_text(neighbor, text)
 
+    def _process_autoreply(self, neighbor, text):
+        self._ui.receive_autoreply(neighbor, text)
+
     def _send_username(self, neighbor):
         """Send our username to a neighbor."""
         tlvs = [TLVUserResponse(self._username)]
@@ -265,6 +299,10 @@ class RTPChat(rtp.ReliableTransportProtocol):
                 self._send_username(neighbor)
             else:
                 self.log.debug("Receiving unknown TLV type.")
+
+    def _send_autoreply(self, neighbor, text):
+        tlvs = [TLVAutoReply(text)]
+        neighbor.send(self._rtphdr.OPC_REPLY, tlvs, True)
 
     def _send_chat_msg(self, neighbor, text):
         tlvs = [TLVText(text)]
