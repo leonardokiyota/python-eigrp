@@ -82,8 +82,8 @@ class ValueBase(object):
         return self._packed
 
     def unpack(self, raw):
-        """Return a tuple containing the unpacked stresentation of this
-        object. Return values correspond to self.FIELDS."""
+        """Return a tuple containing the unpacked representation of this
+        object. Return values corresponding to self.FIELDS."""
         return struct.unpack(self.FORMAT, raw[:self.getlen()])
 
     def __setattr__(self, attr, val):
@@ -377,16 +377,21 @@ class TLVBase(object):
             obj = valclass(raw=raw)
             objs.append(obj)
             index += obj.getlen()
-        # Check for 4 byte alignment
-        pad = self.getpad(index)
-        if index + pad != len(raw):
-            raise(ValueError("Raw data was not padded to 4 bytes, or" 
-                             "garbage follows the data."))
         return objs
 
     def unpack(self, raw):
         hdr = self.unpackhdr(raw)
-        values = self.unpackvalues(raw[self.HDR_LEN:])
+
+        # Don't pass in the pad bytes, if any, when unpacking values.
+        padlen = len(raw) - hdr[1]
+        if padlen < 0:
+            raise(ValueError("Invalid pad length: {}. Length in header: {}, "
+                             "actual raw length: {}".format(padlen,
+                                                            hdr[1],
+                                                            len(raw))))
+        actual_data_len = len(raw) - padlen - self.HDR_LEN
+        values = self.unpackvalues(raw[self.HDR_LEN:self.HDR_LEN+\
+                                                    actual_data_len])
         return hdr, values
 
     @staticmethod
@@ -482,7 +487,7 @@ class TLVFactory(object):
         tlvs = list()
         while index < rawlen:
             tlv = self.build(raw[index:])
-            index += tlv.getlen()
+            index += tlv.getlen() + tlv.getpad(tlv.getlen())
             tlvs.append(tlv)
         return tlvs
 

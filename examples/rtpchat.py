@@ -4,6 +4,7 @@
 that this implementation of RTP is decoupled from EIGRP."""
 
 import Tkinter
+import tkMessageBox
 import sys
 from twisted.internet import tksupport
 
@@ -31,6 +32,9 @@ class _BaseRTPChatGUI(object):
         self._send = sendfunc
         self._quit = quitfunc
 
+    def lost_neigbor(self, neighbor):
+        """Called when a neighbor has gone away."""
+
     def receive_text(self, neighbor, text):
         """Called when a neighbor has sent us a text message."""
 
@@ -49,6 +53,7 @@ class RTPChatTkinterGUI(_BaseRTPChatGUI):
     def _init_gui(self):
         self._root = Tkinter.Tk()
         tksupport.install(self._root)
+        self._root.protocol("WM_DELETE_WINDOW", self._confirm_quit)
         self._root.title("RTPChat Tkinter GUI")
         self._root.geometry("575x685")
 
@@ -94,33 +99,49 @@ class RTPChatTkinterGUI(_BaseRTPChatGUI):
     def _write_local_msg(self, msg):
         """Write a message to self._txt_messages. Make _txt_messages writable
         only while we are using it, so it appears to be read-only to
-        operators."""
+        operators. Scroll the window down to the end."""
         self._txt_messages.config(state=Tkinter.NORMAL)
         self._txt_messages.insert(Tkinter.END, msg + "\n")
         self._txt_messages.config(state=Tkinter.DISABLED)
+        self._txt_messages.yview_moveto(1)
 
     def _confirm_quit(self):
-        # TODO confirm that the operator wants to quit...
-        self._quit()
+        if tkMessageBox.askokcancel("Quit", "Really quit?"):
+            self._quit()
+
+    def lost_neighbor(self, neighbor):
+        self._write_local_msg("Lost neighbor with username " + \
+                              neighbor._username)
+        index = self._neighbor_indexes.index(neighbor)
+        self._neighbor_indexes.remove(neighbor)
+        self._lst_neighbors.delete(index, index)
 
     def _send_text(self):
         """Send the text that was entered in the input Entry widget to the
-        selected neighbor, then clear the input Entry widget."""
+        selected neighbor, then clear the input Entry widget. Also
+        make the message appear locally."""
         neighbor_index = self._lst_neighbors.index(Tkinter.ACTIVE)
-        if neighbor_index == None:
+        try:
+            neighbor = self._neighbor_indexes[neighbor_index]
+        except IndexError:
             self._write_local_msg("You must select a neighbor to talk to before sending a message.")
             return
+            
+        msg = self._var_input.get()
+        self._send(neighbor, msg)
+        self._write_local_msg("You told " + neighbor._username + ": \"" + \
+                              msg + "\"")
 
-        neighbor = self._neighbor_indexes[neighbor_index]
-        self._send(neighbor, self._var_input.get())
         self._var_input.set('')
 
     def receive_text(self, neighbor, text):
-        self._write_local_msg(neighbor._username + " wrote to you: \"" + text.text + "\"")
+        print text.text
+        self._write_local_msg(neighbor._username + " tells you: \"" + text.text + "\"")
 
     def update_username(self, neighbor, username):
         # Keep track of which neighbor is at each index in the
         # neighbor listbox.
+        self._write_local_msg("Updating username for neighbor " + str(neighbor) + " to " + username)
         self._lst_neighbors.insert(Tkinter.END, username)
         self._neighbor_indexes.append(neighbor)
 
@@ -261,7 +282,7 @@ class RTPChat(rtp.ReliableTransportProtocol):
         neighbor.send(self._rtphdr.OPC_REQUEST, tlvs, True)
 
     def lostNeighbor(self, neighbor):
-        pass
+        self._ui.lost_neighbor(neighbor)
 
     def rtpReceived(self, neighbor, hdr, tlvs):
         self.log.debug5("RTPCHAT received a message...")
