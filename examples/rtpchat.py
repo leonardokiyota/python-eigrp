@@ -25,13 +25,19 @@ class _BaseRTPChatGUI(object):
     serves as a programming inteface that should be overriden by the actual
     GUI class."""
 
-    def __init__(self, sendfunc, quitfunc, autoreplyfunc):
-        """sendfunc -- The function that the GUI should call when the
+    def __init__(self, username, sendfunc, quitfunc, autoreplyfunc, namechangefunc):
+        """
+           username -- The local username 
+           sendfunc -- The function that the GUI should call when the
                        GUI has text to send.
-           quitfunc -- A function to call when a user quits the application"""
+           quitfunc -- A function to call when a user quits the application
+           namechangefunc -- Function to call when local username changes
+        """
+        self._username = username
         self._send = sendfunc
         self._quit = quitfunc
         self._autoreply = autoreplyfunc
+        self._namechangefunc = namechangefunc
 
     def lost_neigbor(self, neighbor):
         """Called when a neighbor has gone away."""
@@ -103,11 +109,33 @@ class RTPChatTkinterGUI(_BaseRTPChatGUI):
                                             textvariable=self._var_autoreply)
         self._txt_autoreply.grid(row=2, column=1)
 
+        self._frame_username = Tkinter.LabelFrame(self._frame_main,
+                                               text="My Username")
+        self._frame_username.grid()
+        self._var_username = Tkinter.StringVar()
+        self._txt_username = Tkinter.Entry(self._frame_username,
+                                        textvariable=self._var_username)
+        self._txt_username.grid(row=1, column=1)
+        self._var_username.set(self._username)
+
+        self._btn_change_local_username = Tkinter.Button(self._frame_username,
+                                                   text="Change Username",
+                                        command=self._change_local_username)
+        self._btn_change_local_username.grid(row=4, column=1)
+
         self._write_local_msg("RTP Chat has started. Usage:")
         self._write_local_msg("When a neighbor RTP Chat client comes online, it will appear in the Neighbors list below.")
         self._write_local_msg("Click on a neighbor then type in the Input box to send them a message.")
         self._write_local_msg("Messages that you receive from neighbors will appear in this window.")
         self._write_local_msg("This is really only intended to test out RTP, so don't be surprised if RTP Chat does something bad.")
+
+    def _change_local_username(self):
+        if self._var_username.get() == self._username:
+            self._write_local_msg("Name unchanged.")
+            return
+        self._username = self._var_username.get()
+        self._write_local_msg("Changing username to {}".format(self._username))
+        self._namechangefunc(self._username)
 
     def _write_local_msg(self, msg):
         """Write a message to self._txt_messages. Make _txt_messages writable
@@ -163,8 +191,15 @@ class RTPChatTkinterGUI(_BaseRTPChatGUI):
         # Keep track of which neighbor is at each index in the
         # neighbor listbox.
         self._write_local_msg("Updating username for neighbor " + str(neighbor) + " to " + username)
-        self._lst_neighbors.insert(Tkinter.END, username)
-        self._neighbor_indexes.append(neighbor)
+
+        if username in self._neighbor_indexes:
+            # Neighbor already exists, update the name
+            self.lost_neighbor(username)
+            self.update_username(neighbor, username)
+        else:
+            # Neighbor does not exist, create it
+            self._lst_neighbors.insert(Tkinter.END, username)
+            self._neighbor_indexes.append(neighbor)
 
 
 class ValueText(rtptlv.ValueBase):
@@ -237,8 +272,9 @@ class TLVAutoReply(rtptlv.TLVBase):
 
 class RTPChat(rtp.ReliableTransportProtocol):
 
-    """An example of an upper layer to RTP that is not EIGRP. Used to
-    demonstrate that this implementation of RTP is decoupled from EIGRP."""
+    """An example of an upper layer to RTP that is not EIGRP. Used to test
+    RTP and demonstrate that this implementation of RTP is decoupled from
+    EIGRP."""
 
     # Supported UI options
     GTK_UI = 1
@@ -246,13 +282,15 @@ class RTPChat(rtp.ReliableTransportProtocol):
     def __init__(self, username, ui, ip, *args, **kwargs):
         rtp.ReliableTransportProtocol.__init__(self, *args, **kwargs)
         self.activate_iface(ip)
+        self._username = username
         if ui == self.GTK_UI:
-            self._ui = RTPChatTkinterGUI(self._send_chat_msg,
+            self._ui = RTPChatTkinterGUI(self._username,
+                                         self._send_chat_msg,
                                          reactor.stop,
-                                         self._send_autoreply)
+                                         self._send_autoreply,
+                                         self._change_name)
         else:
             raise(ValueError("Unsupported GUI type: {}".format(ui)))
-        self._username = username
         self._tlvfactory.register_tlvs([TLVText,
                                         TLVUserRequest,
                                         TLVUserResponse,
@@ -307,6 +345,15 @@ class RTPChat(rtp.ReliableTransportProtocol):
     def _send_chat_msg(self, neighbor, text):
         tlvs = [TLVText(text)]
         neighbor.send(self._rtphdr.OPC_REPLY, tlvs, True)
+
+    def _change_name(self, text):
+        """Send name out of every active interface."""
+        self.log.debug5("Sending our username out of all active interfaces...")
+        tlvs = [TLVUserResponse(self._username)]
+        for iface in self._ifaces:
+            if iface.activated:
+                self.log.debug5("Sending our username out of {}".format(iface))
+                iface.send(self._rtphdr.OPC_REPLY, tlvs, True)
 
     def initReceived(self, neighbor):
         pass

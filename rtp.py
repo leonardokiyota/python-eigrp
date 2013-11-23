@@ -245,7 +245,7 @@ class ReliableTransportProtocol(protocol.DatagramProtocol):
                         pkt))
         if ack:
             seq_ips = list()
-            for neighbor in iface.neighbors:
+            for neighbor in iface.get_all_neighbors():
                 # If neighbor has a full queue, add it to a seq tlv
                 if neighbor.queue_full():
                     seq_ips.append(str(neighbor.ip.packed))
@@ -587,6 +587,8 @@ class RTPNeighbor(object):
 
         self._next_multicast_seq = 0
 
+        self._init_ack = 0
+
     def update_kvalues(self, kvalues):
         self._k1 = kvalues[0]
         self._k2 = kvalues[1]
@@ -700,17 +702,54 @@ class RTPNeighbor(object):
 
     def _pending_receive(self, hdr, tlvs):
         """Receive function that is used when the adjacency is PENDING."""
-        # Look for an update packet with init flag set to transition to UP.
+        # Look for an ACK to our INIT packet to transition to UP.
         if hdr.opcode == self._rtphdr.OPC_HELLO and \
            not hdr.ack:
             self.log.debug5("Hello received. Do init.")
             return self.INIT
-        elif hdr.opcode == self._rtphdr.OPC_UPDATE:
-            if hdr.flags & self._rtphdr.FLAG_INIT:
-                self.log.debug5("Init received. Bringing adjacency up.")
-                self._state_receive = self._up_receive
-                return self.NEW_ADJACENCY
+        # Don't process packets that are not HELLO or ACK.
+        if not hdr.ack:
+            return self.DROP
+        curmsg = self._peekrtp()
+        if not curmsg:
+            # We got an ACK but we weren't waiting for an ACK.
+            # We should still let the upper layer process the packet.
+            self.log.debug("Received spurious ACK from neighbor {}. Header: {}".format(self, hdr))
+            return self.DROP
+        if hdr.ack == curmsg.hdr.seq:
+            self.log.debug5("Received ACK {} for INIT pkt {}. Bringing "
+                            "adjacency up".format(hdr.ack, self._peekrtp()))
+            self._poprtp()
+            self._retransmit_event.cancel()
+
+            # We shouldn't have anything queued up while PENDING
+            assert not self._peekrtp(), "Packet was queued in PENDING state"
+            self._state_receive = self._up_receive
+            return self.NEW_ADJACENCY
+        self.log.debug5("Expected ACK for {}, but got "
+                        "{}.".format(curmsg.hdr.seq, hdr.ack))
         return self.DROP
+
+    def _handle_ack(self, hdr):
+        if not hdr.ack:
+            return self.PROCESS
+        curmsg = self._peekrtp()
+        if not curmsg:
+            # We got an ACK but we weren't waiting for an ACK.
+            # We should still let the upper layer process the packet.
+            self.log.debug("Received spurious ACK from neighbor {}. Header: {}".format(self, hdr))
+            return self.PROCESS
+        if hdr.ack == curmsg.hdr.seq:
+            self.log.debug5("Received ACK {} for pkt {}".format(hdr.ack, self._peekrtp()))
+            self._poprtp()
+            self._retransmit_event.cancel()
+            if self._peekrtp():
+                self._retransmit(time.time())
+        else:
+            # We should still process the packet in this case.
+            self.log.debug5("Expected ACK for {}, but got "
+                            "{}.".format(curmsg.hdr.seq, hdr.ack))
+        return self.PROCESS
 
     def _up_receive(self, hdr, tlvs):
         """Receive function that is used when the adjacency is UP."""
@@ -733,28 +772,21 @@ class RTPNeighbor(object):
             self.log.debug5("Received dupe packet, seq {}".format(hdr.seq))
             return self.DROP
         self._seq_from = hdr.seq
-        if hdr.ack:
-            curmsg = self._peekrtp()
-            if not curmsg:
-                # We got an ACK but we weren't waiting for an ACK.
-                # We should still let the upper layer process the packet.
-                self.log.debug("Received spurious ACK from neighbor {}. Header: {}".format(self, hdr))
-                return self.PROCESS
-            if hdr.ack == curmsg.hdr.seq:
-                self.log.debug5("Received ACK {} for pkt {}".format(hdr.ack, self._peekrtp()))
-                self._poprtp()
-                self._retransmit_event.cancel()
-                if self._peekrtp():
-                    self._retransmit(time.time())
-            else:
-                # We should still process the packet in this case.
-                self.log.debug5("Expected ACK for {}, but got "
-                                "{}.".format(curmsg.hdr.seq, hdr.ack))
-        return self.PROCESS
+        return self._handle_ack(hdr)
 
     def schedule_multicast_retransmission(self, pkt):
         """Schedule the retransmission of a multicast packet as a unicast."""
-        self._pushrtp(pkt)
+        # Note: This is basically self._pushrtp except if the queue is empty
+        # we don't send a unicast immediately. This is because we've already
+        # sent the packet as a multicast in the caller.
+        # XXX For this reason, perhaps pushrtp can be refactored so that it
+        # does not need to call write() either -- then we could just call
+        # pushrtp here. The caller would always call write.
+        if not self._peekrtp():
+            self._seq_to = pkt.hdr.seq
+            self._retransmit_event = reactor.callLater(self._retransmit_timer,
+                                                self._retransmit, time.time())
+        self._queue.appendleft(pkt)
 
     def send(self, opcode, tlvs, ack, flags=0):
         """Wrapper for ReliableTransportProtocol.__send_rtp_unicast.
@@ -838,6 +870,9 @@ class RTPInterface(object):
         self._write = writefunc
         self._rtphdr = rtphdr
         self.activated = False
+
+    def get_all_neighbors(self):
+        return self._neighbors.values()
 
     def __str__(self):
         return self.logical_iface.ip.ip.exploded + " (" + self.logical_iface.phy_iface.name + ")"
