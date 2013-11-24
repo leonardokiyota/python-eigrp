@@ -192,10 +192,12 @@ class RTPChatTkinterGUI(_BaseRTPChatGUI):
         # neighbor listbox.
         self._write_local_msg("Updating username for neighbor " + str(neighbor) + " to " + username)
 
-        if username in self._neighbor_indexes:
-            # Neighbor already exists, update the name
-            self.lost_neighbor(username)
-            self.update_username(neighbor, username)
+        for neighbor in self._neighbor_indexes:
+            if username == neighbor._username:
+                # Neighbor already exists, update the name
+                self.lost_neighbor(neighbor)
+                self.update_username(neighbor, username)
+                break
         else:
             # Neighbor does not exist, create it
             self._lst_neighbors.insert(Tkinter.END, username)
@@ -346,13 +348,15 @@ class RTPChat(rtp.ReliableTransportProtocol):
         tlvs = [TLVText(text)]
         neighbor.send(self._rtphdr.OPC_REPLY, tlvs, True)
 
-    def _change_name(self, text):
+    def _change_name(self, newname):
         """Send name out of every active interface."""
+        self.log.debug5("Username changed to {}".format(newname))
         self.log.debug5("Sending our username out of all active interfaces...")
+        self._username = newname
         tlvs = [TLVUserResponse(self._username)]
         for iface in self._ifaces:
             if iface.activated:
-                self.log.debug5("Sending our username out of {}".format(iface))
+                self.log.debug5("Sending username out of {}".format(iface))
                 iface.send(self._rtphdr.OPC_REPLY, tlvs, True)
 
     def initReceived(self, neighbor):

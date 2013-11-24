@@ -841,9 +841,12 @@ class RTPNeighbor(object):
             self._retransmit_event = reactor.callLater(self._retransmit_timer,
                                            self._retransmit, init_time, False)
         else:
-            # XXX Shouldn't we drop the neighbor here? DUAL at least won't
-            # operate correctly if RTP simply drops sequenced messages. 
-            self.log.debug("Retransmit timer exceeded.")
+            # I think we should drop the neighbor if we can't transmit to it.
+            # DUAL won't operate correctly if RTP drops a sequenced
+            # messages.
+            self.log.debug("Retransmit timer exceeded, dropping neighbor.")
+            self._drop_event.cancel()
+            self._dropfunc(self)
 
     def _peekrtp(self):
         """Return the next RTP packet in the transmission queue without
