@@ -1,8 +1,38 @@
 #!/usr/bin/env python
+#
+# The checksum computation code is from Scapy's utils.py in Python 2.7.
+# Copyright notice from Scapy:
+#
+# """See http://www.secdev.org/projects/scapy for more informations
+#    Copyright (C) Philippe Biondi <phil@secdev.org>
+#   This program is published under a GPLv2 license"""
+#
+# (Note that the URL has changed to https://www.secdev.org/scapy/ since
+# the above copyright notice was listed.)
+#
+# For the rest of it:
+# Python-EIGRP (http://python-eigrp.googlecode.com)
+# Copyright (C) 2013 Patrick F. Allen
+# 
+# This program is free software; you can redistribute it and/or
+# modify it under the terms of the GNU General Public License
+# as published by the Free Software Foundation; either version 2
+# of the License, or (at your option) any later version.
+# 
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+# 
+# You should have received a copy of the GNU General Public License
+# along with this program; if not, write to the Free Software
+# Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
+
 
 """Reliable Transport Protocol implementation for Twisted."""
 
 import struct
+import array
 import ipaddr
 import copy
 import time
@@ -341,18 +371,21 @@ class ReliableTransportProtocol(protocol.DatagramProtocol):
                           "first {} bytes: {}".format((addr, bytes_to_print, \
                           binascii.hexlify(data[:bytes_to_print]))))
             return
-        observed_chksum = hdr.chksum
-        hdr.chksum = 0
-        payload = data[self._rtphdr.LEN:]
-        real_chksum = RTPPacket.calc_chksum(hdr.pack() + payload)
-        if real_chksum != observed_chksum:
-            self.log.debug("Bad checksum: expected 0x%x, was 0x%x" % \
-                           (addr, real_chksum, real_chksum))
+
+        # RFC 1071:
+        # To check a checksum, the 1's complement sum is computed over the
+        # same set of octets, including the checksum field.  If the result
+        # is all 1 bits (-0 in 1's complement arithmetic), the check
+        # succeeds."
+        if RTPPacket.checksum(data) != 0xffff:
+            self.log.debug("Dropping packet with bad checksum.")
             return
         if hdr.ver != self._rtphdr.VER:
             self.log.debug("Received incompatible header version "
                            "{}.".format(hdr.hdrver, addr))
             return
+
+        payload = data[self._rtphdr.LEN:]
 
         # XXX Catch and log exceptions from factory
         tlvs = self._tlvfactory.build_all(payload)
@@ -424,29 +457,38 @@ class RTPPacket(object):
         fields = ""
         for f in self.fields:
             fields += f.pack()
-        self.hdr.chksum = self.calc_chksum(prehdr + fields)
+        self.hdr.chksum = self.checksum(prehdr + fields)
         hdr = self.hdr.pack()
         return hdr + fields
 
-    # Checksum related functions are from:
-    # http://stackoverflow.com/questions/1767910/checksum-udp-calculation-python
-    @staticmethod
-    def calc_chksum(data):
-        """Get one's complement of the one's complement sum of data.
-        Returns the 16 bit checksum.
-        """
-        data = map(lambda x: ord(x), data)
-        data = struct.pack("%dB" % len(data), *data)
-        s = 0
-        for i in range(0, len(data), 2):
-            w = ord(data[i]) + (ord(data[i+1]) << 8)
-            s = RTPPacket.carry_around_add(s, w)
-        return ~s & 0xffff
-
-    @staticmethod
-    def carry_around_add(a, b):
-        c = a + b
-        return (c & 0xffff) + (c >> 16)
+    # Checksum functions are from Python2.7's utils.py. Copyright notice from
+    # Scapy:
+    ## This file is part of Scapy
+    ## See http://www.secdev.org/projects/scapy for more informations
+    ## Copyright (C) Philippe Biondi <phil@secdev.org>
+    ## This program is published under a GPLv2 license
+    # (Note that the URL has changed to https://www.secdev.org/scapy/ since
+    # the above copyright notice was listed.)
+    if struct.pack("H",1) == "\x00\x01": # big endian
+        @staticmethod
+        def checksum(pkt):
+            if len(pkt) % 2 == 1:
+                pkt += "\0"
+            s = sum(array.array("H", pkt))
+            s = (s >> 16) + (s & 0xffff)
+            s += s >> 16
+            s = ~s
+            return s & 0xffff or 0xffff
+    else:
+        @staticmethod
+        def checksum(pkt):
+            if len(pkt) % 2 == 1:
+                pkt += "\0"
+            s = sum(array.array("H", pkt))
+            s = (s >> 16) + (s & 0xffff)
+            s += s >> 16
+            s = ~s
+            return (((s>>8)&0xff)|s<<8) & 0xffff or 0xffff
 
 
 class RTPHeader2(object):
