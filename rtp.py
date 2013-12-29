@@ -154,7 +154,7 @@ class ReliableTransportProtocol(protocol.DatagramProtocol):
         logging.config.fileConfig(configfile)
         self.log = logging.getLogger("RTP")
         util.suppress_reactor_not_running()
-        
+
     def _init_ifaces(self):
         self._ifaces = list()
         for iface in self._sys.logical_ifaces:
