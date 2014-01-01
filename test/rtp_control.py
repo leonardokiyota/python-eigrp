@@ -9,27 +9,36 @@ sys.path.append("..")
 import rtp
 import sysiface
 
-class ControlledRTP(rtp.ReliableTransportProtocol):
-    def before_ReliableTransportProtocol__send_explicit_ack(self, neighbor):
-        pass
+class ExampleControlledRTP(rtp.ReliableTransportProtocol):
 
-    def after_ReliableTransportProtocol__send_explicit_ack(self, neighbor):
+    """Example RTP class with hooked functions."""
+
+    def before_ReliableTransportProtocol__send_explicit_ack(self, neighbor):
         pass
 
 
 class HookedFunction(object):
 
-    """A function that has a before and after call."""
+    """A function that has one function called before it, and another called
+    after it."""
 
     def __init__(self, real, before, after):
+        """Call order goes: before, real, after.
+        If 'before' returns True, then 'real' and 'after' are not called."""
         self.real = real
         self.before = before
         self.after = after
 
     def __call__(self, *args, **kwargs):
-        self.before(*args, **kwargs)
+        if self.before(*args, **kwargs):
+            return
         self.real(*args, **kwargs)
         self.after(*args, **kwargs)
+
+
+def NoOpFunction(*args, **kwargs):
+    """A function that accepts any arguments and returns immediately."""
+    pass
 
 
 def make_hooks(cls):
@@ -56,14 +65,15 @@ def make_hooks(cls):
 
         # If only one function is used, make a stub function for the other.
         if not before_func:
-            before_func = lambda: None
+            before_func = NoOpFunction
         if not after_func:
-            after_func = lambda: None
+            after_func = NoOpFunction
 
         # Set the original real function to use the hooked function
         setattr(cls, objname, HookedFunction(obj, before_func, after_func))
 
 if __name__ == "__main__":
     system = sysiface.SystemFactory(0, 0).build()
-    controlled_rtp = ControlledRTP(system, "../logging.conf")
+    controlled_rtp = ExampleControlledRTP(system, "../logging.conf")
     make_hooks(controlled_rtp)
+    controlled_rtp._ReliableTransportProtocol__send_explicit_ack(None)
