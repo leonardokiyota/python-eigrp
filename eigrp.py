@@ -47,7 +47,7 @@ class EIGRP(rtp.ReliableTransportProtocol):
         """An EIGRP implementation based on Cisco's draft informational RFC
         located here:
 
-        http://www.ietf.org/id/draft-savage-eigrp-00.txt
+        http://www.ietf.org/id/draft-savage-eigrp-01.txt
 
         requested_ifaces -- Iterable of IP addresses to send from
         routes -- Iterable of routes to import
@@ -57,6 +57,9 @@ class EIGRP(rtp.ReliableTransportProtocol):
                       (not implemented)
         """
         rtp.ReliableTransportProtocol.__init__(self, *args, **kwargs)
+        # XXX Should probably move all kvalue stuff out of RTP and into EIGRP then allow a way to add
+        # arbitrary data to RTP's HELLO messages (along with verification functions for neighbor
+        # formation). Not all upper layers to RTP need kvalues. Until then, this works.
         if self._k1 == 0 and \
            self._k2 == 0 and \
            self._k3 == 0 and \
@@ -118,63 +121,8 @@ class EIGRP(rtp.ReliableTransportProtocol):
         self.log.debug("Processing REPLY")
 
     def _eigrp_op_handler_hello(self, addr, hdr, tlvs):
-        # XXX Handle a neighbor that changes k-values or holdtime while in
-        # PENDING or UP state
-        self.log.debug("Processing HELLO")
-        for tlv in tlvs:
-            self.log.debug5(tlv)
-            if tlv.type == TLVParam.TYPE:
-                if tlv.param.k1 != self._k1 or \
-                   tlv.param.k2 != self._k2 or \
-                   tlv.param.k3 != self._k3 or \
-                   tlv.param.k4 != self._k4 or \
-                   tlv.param.k5 != self._k5:
-                    self.log.debug("Parameter mismatch between potential "
-                                   "neighbor at %s." % (addr))
-        neighbor = self._get_neighbor(addr)
-        if not neighbor:
-            # XXX Get actual incoming interface
-            self._add_neighbor(addr, "IFACE", hdr.seq, tlv.param.holdtime)
-            self.log.debug("New pending neighbor: %s" % addr)
-        else:
-            neighbor.last_heard = time.time()
-
-    def _get_neighbor(self, ip):
-        for neighbor in self._neighbors:
-            if neighbor.ip.exploded == ip:
-                return neighbor
-        return None
-
-    def _add_neighbor(self, addr, iface, seq, holdtime):
-        neighbor = RTPNeighbor(addr, iface, seq, holdtime)
-        self._neighbors.append(neighbor)
-        self._send_update(neighbor)
-
-        if len(self._neighbors) == 1:
-            nextcall = neighbor.holdtime + 1
-            self._next_holdtime_check = time.time() + nextcall
-            self.log.debug("Checking neighbor holdtimes in %d second(s)." % \
-                           nextcall)
-            reactor.callLater(nextcall, self._check_neighbor_holdtimes)
-        else:
-            if time.time() + neighbor.holdtime + 1 >= \
-                                                self._next_holdtime_check:
-                return
-
-            # New neighbor has a shorter holdtime than the wait until we
-            # were going to check holdtimes again. Check holdtimes sooner.
-            # If we don't do this and our first neighbor sends us a packet
-            # with a huge holdtime, then if we get a new neighbor we wouldn't
-            # check the new neighbor's holdtime until the huge holdtime
-            # expires.
-            for call in reactor.getDelayedCalls():
-                if call.func == self._check_neighbor_holdtimes:
-                    nextcall = neighbor.holdtime + 1
-                    self._next_holdtime_check = time.time() + nextcall
-                    call.reset(nextcall)
-                    self.log.debug("Neighbor caused a change in the holdtime "
-                                   "check timer. Checking neighbor holdtimes "
-                                   "again in %d second(s)." % nextcall)
+        """RTP deals with HELLOs, nothing to do here."""
+        pass
 
     def _send_update(self, neighbor, init=False):
         """Send an update packet. Used after discovering a new neighbor."""
@@ -187,25 +135,6 @@ class EIGRP(rtp.ReliableTransportProtocol):
         tlvs = [] # XXX
         pkt = RTPPacket(hdr, tlvs)
         neighbor.pushmsg(pkt)
-
-    def _check_neighbor_holdtimes(self):
-        self.log.debug("Checking neighbor holdtimes.")
-        nextcall = sys.maxint
-        now = time.time()
-        for neighbor in self._neighbors[:]:
-            expiration = (neighbor.last_heard + neighbor.holdtime) - now
-            if expiration < 1:
-                self._del_neighbor(neighbor)
-            elif expiration < nextcall:
-                nextcall = expiration + 1
-        if not len(self._neighbors):
-            self.log.debug("No more neighbors.")
-            assert(nextcall == sys.maxint)
-        else:
-            self.log.debug("Checking neighbor holdtimes again in %d"
-                           " second(s)." % nextcall)
-            self._next_holdtime_check = now + nextcall
-            reactor.callLater(nextcall, self._check_neighbor_holdtimes)
 
     def _eigrp_op_handler_siaquery(self, addr, hdr, data):
         self.log.debug("Processing SIAQUERY")
@@ -229,46 +158,6 @@ class EIGRP(rtp.ReliableTransportProtocol):
         self.log.info("Cleaning up.")
         self._sys.cleanup()
 
-    def _rtp_receive(self, addr, hdr):
-        """Process the reliable packet.
-        Returns True if processing should continue on the packet,
-        otherwise returns False."""
-        neighbor = self._get_neighbor(addr)
-        if not neighbor:
-            if hdr.opcode != self._rtphdr.OPC_HELLO:
-                self.log.debug("Received non-hello packet from non-neighbor."
-                               " Opcode: %d" % (addr, hdr.opcode))
-                return False
-            else:
-                return True
-        if hdr.flags & self._rtphdr.FLAG_CR:
-            if not self._crmode:
-                self.log.debug5("CR flag on packet but we are not in CR mode.")
-                return False
-            else:
-                self.log.debug5("CR flag on packet and we are in CR mode.")
-        if not hdr.seq:
-            # Packet was not reliably transmitted
-            return True
-        if hdr.seq == neighbor.seq:
-            self.log.debug5("Received duplicate sequence number.")
-            # Already received this packet, discard and send an ack
-            self._send_ack(addr, hdr.seq)
-            return False
-
-        # XXX Deal with sequence number wrapping, skip 0
-
-        # Send ack for received packet and allow processing
-        self._send_ack(addr, hdr.seq)
-        neighbor.seq = hdr.seq
-        return True
-
-    def _send_ack(self, addr, ack):
-        hdr = self._rtphdr(opcode=self._rtphdr.OPC_HELLO, flags=0, seq=0,
-                           ack=ack, rid=self._rid, asn=self._asn)
-        pkt = RTPPacket(hdr, []).pack()
-        self._write(pkt, addr)
-
     def startProtocol(self):
         for iface in self._sys.logical_ifaces:
             if iface.activated:
@@ -285,45 +174,6 @@ class EIGRP(rtp.ReliableTransportProtocol):
         pass
 
     def rtpReceived(self, neighbor, hdr, tlvs):
-        addr = addr_and_zero[0]
-        self.log.debug5("Received datagram from %s" % addr)
-        host_local = False
-        for local_iface in self._sys.logical_ifaces:
-            if local_iface.ip.ip.exploded == addr:
-                host_local = True
-                break
-        if host_local:
-            self.log.debug5("Ignoring message from local system.")
-            return
-
-        self.log.debug("Processing datagram from %s" % addr)
-        try:
-            hdr = self._rtphdr(data[:self._rtphdr.LEN])
-        except struct.error:
-            bytes_to_print = self._rtphdr.LEN
-            self.log.warn("Received malformed datagram from %s. Hexdump of "
-                          "first %d bytes: %s" % (addr, bytes_to_print, \
-                          binascii.hexlify(data[:bytes_to_print])))
-            return
-        observed_chksum = hdr.chksum
-        hdr.chksum = 0
-        payload = data[self._rtphdr.LEN:]
-        real_chksum = RTPPacket.calc_chksum(hdr.pack() + payload)
-        if real_chksum != observed_chksum:
-            self.log.debug("Bad checksum: expected 0x%x, was 0x%x" % (addr, real_chksum, real_chksum))
-            return
-        if hdr.ver != self._rtphdr.VER:
-            self.log.warn("Received incompatible header version %d from "
-                          "host %s" % (hdr.hdrver, addr))
-            return
-
-        tlvs = self._fieldfactory.build_all(payload)
-        if not self._rtp_receive(addr, hdr):
-            self.log.debug5("RTP rejected packet.")
-            return
-        else:
-            self.log.debug5("RTP accepted packet for processing.")
- 
         try:
             handler = self._op_handlers[hdr.opcode]
         except KeyError:
