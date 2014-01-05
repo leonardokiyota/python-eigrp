@@ -239,8 +239,8 @@ class ValueSeq(ValueBase):
     MAX_ADDR_SIZE = (1 << (8 * ADDRLEN_FMT_SIZE)) - 1
 
     def __init__(self, *args, **kwargs):
-        super(ValueBase, self).__thisclass__.__init__(self, *args, **kwargs)
         self.addrs = list()
+        super(ValueBase, self).__thisclass__.__init__(self, *args, **kwargs)
 
     def _parse_kwargs(self, kwargs):
         self.addrs = self.unpack(kwargs["raw"])
@@ -251,7 +251,7 @@ class ValueSeq(ValueBase):
             self.add_addr(addr)
 
     def add_addr(self, addr):
-        if len(addr) > MAX_ADDR_SIZE:
+        if len(addr) > self.MAX_ADDR_SIZE:
             raise(ValueError("Address length exceeds max address size."))
         self.addrs.append(addr)
 
@@ -259,10 +259,6 @@ class ValueSeq(ValueBase):
         if not self._packed:
             # Only assign to self._packed once because parent's
             # __setattr__ will clear self._packed every time it is modified.
-
-            # For every addr in self.addrs:
-            #   Get the length and insert
-            #  get the length of the 
             packed = ""
             for addr in self.addrs:
                 packed += struct.pack(self.ADDRLEN_FMT, len(addr))
@@ -280,9 +276,9 @@ class ValueSeq(ValueBase):
         # typical lengths are 4 for IPv4 and 16 for IPv6. We'll support
         # addresses of any length here.
         while offset < rawlen:
-            size = struct.unpack_from(addrlen_fmt, raw, offset)
-            offset += addrlen_fmt_size
-            seq_addrs.append(struct.unpack_from(raw, "%ss" % size, offset))
+            size = struct.unpack_from(self.ADDRLEN_FMT, raw, offset)[0]
+            offset += self.ADDRLEN_FMT_SIZE
+            seq_addrs.append(struct.unpack_from("%ss" % size, raw, offset)[0])
             offset += size
         return seq_addrs
 
@@ -415,6 +411,9 @@ class TLVSeq(TLVBase):
     TYPE   = TLVBase.PROTO_GENERIC | 3
     VALUES = [ ValueSeq ]
 
+    def _parse_args(self, args):
+        self.seq = ValueSeq(*args)
+
 
 class TLVVersion(TLVBase):
     # TODO
@@ -423,7 +422,6 @@ class TLVVersion(TLVBase):
 
 
 class TLVMulticastSeq(TLVBase):
-    # TODO
     TYPE   = TLVBase.PROTO_GENERIC | 5
     VALUES = [ ValueMulticastSeq ]
 
@@ -452,6 +450,7 @@ class TLVInternal4(TLVBase):
 
 
 class TLVFactory(object):
+
     """Factory for arbitrary Type Length Value fields."""
 
     def __init__(self, tlvclasses=None, hdr_unpacker=TLVBase.unpackhdr,

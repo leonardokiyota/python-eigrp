@@ -199,7 +199,10 @@ class ReliableTransportProtocol(protocol.DatagramProtocol):
         self.log.debug("Neighbor {} DOWN, iface {}".format(neighbor,
                        neighbor.iface))
         if send_upper:
+            self.log.debug("Notifying upper layer.")
             self.lostNeighbor(neighbor)
+        else:
+            self.log.debug("Not notifying upper layer.")
         neighbor.iface.del_neighbor(neighbor)
 
     def __send_explicit_ack(self, neighbor):
@@ -287,7 +290,7 @@ class ReliableTransportProtocol(protocol.DatagramProtocol):
                 neighbor.schedule_multicast_retransmission(copy.deepcopy(pkt))
             if seq_ips:
                 self.__send_seq_tlv(iface, seq_ips, pkt.hdr.seq)
-                hdr.flags |= self._rtphdr.FLAG_CR
+                pkt.hdr.flags |= self._rtphdr.FLAG_CR
         self.__send(pkt.pack(), self._multicast_ip, self._port,
                     iface.logical_iface.ip)
 
@@ -396,6 +399,7 @@ class ReliableTransportProtocol(protocol.DatagramProtocol):
         # Create neighbor if it doesn't exist.
         neighbor = iface.get_neighbor(addr)
         if not neighbor:
+            self.log.debug("Packet received from non-neighbor.")
             if hdr.opcode != self._rtphdr.OPC_HELLO:
                 self.log.debug("Received unexpected opcode {} from "
                                "non-neighbor.".format(hdr.opcode))
@@ -741,13 +745,12 @@ class RTPNeighbor(object):
 
     def _handle_hello_seq_tlv(self, hdr, tlv):
         for addr in tlv.seq.addrs:
-            for iface in sys.logical_ifaces:
-                if iface.ip.packed == addr:
-                    self._cr_mode = False
-
+            if self.iface.logical_iface.ip.packed == addr:
+                self._cr_mode = False
+                return
         self._cr_mode = True
 
-    def _handle_hello_multicastseq_tlv(hdr, tlv):
+    def _handle_hello_multicastseq_tlv(self, hdr, tlv):
         self._next_multicast_seq = tlv.multicastseq.seq
 
     def _update_last_heard(self):
