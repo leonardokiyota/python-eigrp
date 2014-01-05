@@ -154,6 +154,15 @@ class RTPChatTkinterGUI(_BaseRTPChatGUI):
             self._quit()
 
     def lost_neighbor(self, neighbor):
+        try:
+            neighbor._username
+        except AttributeError:
+            # This happens if RTP forms a neighbor relationship but the
+            # other RTPChat client doesn't send us its username and then
+            # we lose it as a neighbor. (For example, if we're purposefully
+            # dropping ACK packets and it runs out of retransmissions.)
+            self._write_local_msg("Lost a neighbor before it sent a username.")
+            return
         self._write_local_msg("Lost neighbor with username " + \
                               neighbor._username)
         index = self._neighbor_indexes.index(neighbor)

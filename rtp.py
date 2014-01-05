@@ -192,10 +192,14 @@ class ReliableTransportProtocol(protocol.DatagramProtocol):
                        neighbor.iface))
         self.foundNeighbor(neighbor)
 
-    def __rtp_lost_neighbor(self, neighbor):
+    def __rtp_lost_neighbor(self, neighbor, send_upper):
+        """Drop this neighbor. Optionally tell the upper layer the neighbor
+        was lost. We don't tell the upper layer that the neighbor was lost if
+        we never said the neigbor was UP to begin with."""
         self.log.debug("Neighbor {} DOWN, iface {}".format(neighbor,
                        neighbor.iface))
-        self.lostNeighbor(neighbor)
+        if send_upper:
+            self.lostNeighbor(neighbor)
         neighbor.iface.del_neighbor(neighbor)
 
     def __send_explicit_ack(self, neighbor):
@@ -204,7 +208,6 @@ class ReliableTransportProtocol(protocol.DatagramProtocol):
                            ack=neighbor.next_ack, rid=self._rid,
                            asn=self._asn)
         msg = RTPPacket(hdr, []).pack()
-        neighbor.next_ack = 0
         self.__send(msg, neighbor.ip.exploded, self._port)
 
     def __get_input_iface(self, ip):
@@ -436,6 +439,7 @@ class ReliableTransportProtocol(protocol.DatagramProtocol):
         # has been sent yet by upper layer), send an explicit ack.
         if neighbor.next_ack:
             self.__send_explicit_ack(neighbor)
+            neighbor.next_ack = 0
 
 
 class RTPPacket(object):
@@ -608,7 +612,7 @@ class RTPNeighbor(object):
         # This should be updated by the packet that causes us to be
         # initialized. So this event will be rescheduled to the neighbor's real
         # holdtime before control is passed back to Twisted.
-        self._drop_event = reactor.callLater(10, self._dropfunc, self)
+        self._drop_event = reactor.callLater(10, self._drop_self)
 
         # The next ack number we should send to this neighbor. Not the same
         # as seq_to because this will change to 0 after we send an ack.
@@ -630,6 +634,14 @@ class RTPNeighbor(object):
         self._next_multicast_seq = 0
 
         self._init_ack = 0
+
+    def _drop_self(self):
+        # If we're still pending, then the upper layer doesn't know about us,
+        # so don't tell them that we were lost.
+        if self._state_receive == self._up_receive:
+            self._dropfunc(self, send_upper=True)
+        elif self._state_receive == self._pending_receive:
+            self._dropfunc(self, send_upper=False)
 
     def update_kvalues(self, kvalues):
         self._k1 = kvalues[0]
@@ -888,7 +900,7 @@ class RTPNeighbor(object):
             # messages.
             self.log.debug("Retransmit timer exceeded, dropping neighbor.")
             self._drop_event.cancel()
-            self._dropfunc(self)
+            self._drop_self()
 
     def _peekrtp(self):
         """Return the next RTP packet in the transmission queue without
