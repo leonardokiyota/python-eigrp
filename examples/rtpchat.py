@@ -25,19 +25,22 @@ class _BaseRTPChatGUI(object):
     serves as a programming inteface that should be overriden by the actual
     GUI class."""
 
-    def __init__(self, username, sendfunc, quitfunc, autoreplyfunc, namechangefunc):
+    def __init__(self, username, sendfunc, quitfunc, autoreplyfunc,
+                 namechangefunc, log):
         """
            username -- The local username 
            sendfunc -- The function that the GUI should call when the
                        GUI has text to send.
            quitfunc -- A function to call when a user quits the application
            namechangefunc -- Function to call when local username changes
+           log -- A log object
         """
         self._username = username
         self._send = sendfunc
         self._quit = quitfunc
         self._autoreply = autoreplyfunc
         self._namechangefunc = namechangefunc
+        self.log = log
 
     def lost_neigbor(self, neighbor):
         """Called when a neighbor has gone away."""
@@ -192,14 +195,17 @@ class RTPChatTkinterGUI(_BaseRTPChatGUI):
         # neighbor listbox.
         self._write_local_msg("Updating username for neighbor " + str(neighbor) + " to " + username)
 
-        for neighbor in self._neighbor_indexes:
-            if username == neighbor._username:
+        for neigh in self._neighbor_indexes:
+            if username == neigh._username:
                 # Neighbor already exists, update the name
-                self.lost_neighbor(neighbor)
-                self.update_username(neighbor, username)
+                self.log.debug("Deleting neighbor to re-add it with new name.")
+                self.lost_neighbor(neigh)
+                self.log.debug("Re-adding neighbor.")
+                self.update_username(neigh, username)
                 break
         else:
             # Neighbor does not exist, create it
+            self.log.debug("Neighbor does not exist, creating.")
             self._lst_neighbors.insert(Tkinter.END, username)
             self._neighbor_indexes.append(neighbor)
 
@@ -290,7 +296,8 @@ class RTPChat(rtp.ReliableTransportProtocol):
                                          self._send_chat_msg,
                                          reactor.stop,
                                          self._send_autoreply,
-                                         self._change_name)
+                                         self._change_name,
+                                         self.log)
         else:
             raise(ValueError("Unsupported GUI type: {}".format(ui)))
         self._tlvfactory.register_tlvs([TLVText,
@@ -315,7 +322,7 @@ class RTPChat(rtp.ReliableTransportProtocol):
 
     def _update_username(self, neighbor, text):
         self.log.debug("Updating neighbor {} to use username " \
-                       "{}".format(neighbor, text))
+                       "{}.".format(neighbor, text))
         neighbor._username = text
         self._ui.update_username(neighbor, text)
 
