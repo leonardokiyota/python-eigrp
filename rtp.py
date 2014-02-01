@@ -39,8 +39,8 @@ import time
 import logging
 from collections import deque
 from twisted.internet import protocol
-import logging
 import logging.config
+import binascii
 
 from tw_baseiptransport import reactor
 import rtptlv
@@ -222,10 +222,11 @@ class ReliableTransportProtocol(protocol.DatagramProtocol):
         ip = ipaddr.IPv4Address(ip)
         for iface in self._ifaces:
             if ip in iface.logical_iface.ip:
-                return (iface, iface.logical_iface.ip.ip.exploded == ip.exploded)
+                return (iface, iface.logical_iface.ip.ip.exploded == \
+                        ip.exploded)
         return None, False
 
-    def __add_neighbor(self, addr, port, iface, hdr):
+    def __add_neighbor(self, addr, iface):
         """Add a neighbor to the list of neighbors.
         Return the new neighbor object, or None on failure."""
         addr = ipaddr.IPv4Address(addr)
@@ -388,7 +389,7 @@ class ReliableTransportProtocol(protocol.DatagramProtocol):
             return
         if hdr.ver != self._rtphdr.VER:
             self.log.debug("Received incompatible header version "
-                           "{}.".format(hdr.hdrver, addr))
+                           "{}.".format(hdr.VER, addr))
             return
 
         payload = data[self._rtphdr.LEN:]
@@ -413,7 +414,7 @@ class ReliableTransportProtocol(protocol.DatagramProtocol):
                 self.log.debug("Param TLV not present in initial hello. "
                                "Dropping packet.")
                 return
-            neighbor = self.__add_neighbor(addr, port, iface, hdr)
+            neighbor = self.__add_neighbor(addr, iface)
             if not neighbor:
                 self.log.debug("Failed to add neighbor.")
                 return
@@ -447,6 +448,10 @@ class ReliableTransportProtocol(protocol.DatagramProtocol):
 
 
 class RTPPacket(object):
+
+    """A packet used with RTP. Consists of a header plus zero or more
+    fields."""
+
     def __init__(self, hdr, fields):
         self.hdr = hdr
         try:
@@ -457,7 +462,8 @@ class RTPPacket(object):
             self.fields = fields
 
     def __str__(self):
-        return "RTPPacket(hdr=" + str(self.hdr) + ", fields=" + str(self.fields) + ")"
+        return "RTPPacket(hdr=" + str(self.hdr) + ", fields=" + \
+               str(self.fields) + ")"
 
     def pack(self):
         self.hdr.chksum = 0
@@ -477,7 +483,7 @@ class RTPPacket(object):
     ## This program is published under a GPLv2 license
     # (Note that the URL has changed to https://www.secdev.org/scapy/ since
     # the above copyright notice was listed.)
-    if struct.pack("H",1) == "\x00\x01": # big endian
+    if struct.pack("H", 1) == "\x00\x01": # big endian
         @staticmethod
         def checksum(pkt):
             if len(pkt) % 2 == 1:
@@ -684,6 +690,15 @@ class RTPNeighbor(object):
             elif hdr.seq == self._next_multicast_seq:
                 self._cr_mode = False
                 self._next_multicast_seq = 0
+            else:
+                # CR mode is set but packet didn't have the sequence number
+                # that we saw in the Next Multicast Seq TLV. Either the
+                # remote router is misbehaving or possibly we're receiving
+                # copies of an old packet (L2 loop?).
+                self.log.debug("Unexpected multicast sequence number received "
+                               "in CR mode. Got {}, expected {}."
+                               "".format(hdr.seq, self._next_multicast_seq))
+                return self.DROP
 
         # This will cause last_heard to be updated when we receive
         # an ACK in addition to when we receive a periodic hello. In reality
@@ -771,7 +786,8 @@ class RTPNeighbor(object):
         if not curmsg:
             # We got an ACK but we weren't waiting for an ACK.
             # We should still let the upper layer process the packet.
-            self.log.debug("Received spurious ACK from neighbor {}. Header: {}".format(self, hdr))
+            self.log.debug("Received spurious ACK from neighbor {}. "
+                           "Header: {}".format(self, hdr))
             return self.DROP
         if hdr.ack == curmsg.hdr.seq:
             self.log.debug5("Received ACK {} for INIT pkt {}. Bringing "
@@ -794,10 +810,12 @@ class RTPNeighbor(object):
         if not curmsg:
             # We got an ACK but we weren't waiting for an ACK.
             # We should still let the upper layer process the packet.
-            self.log.debug("Received spurious ACK from neighbor {}. Header: {}".format(self, hdr))
+            self.log.debug("Received spurious ACK from neighbor {}. "
+                           "Header: {}".format(self, hdr))
             return self.PROCESS
         if hdr.ack == curmsg.hdr.seq:
-            self.log.debug5("Received ACK {} for pkt {}".format(hdr.ack, self._peekrtp()))
+            self.log.debug5("Received ACK {} for pkt {}"
+                            "".format(hdr.ack, self._peekrtp()))
             self._poprtp()
             self._retransmit_event.cancel()
             if self._peekrtp():
@@ -935,7 +953,8 @@ class RTPInterface(object):
         return self._neighbors.values()
 
     def __str__(self):
-        return self.logical_iface.ip.ip.exploded + " (" + self.logical_iface.phy_iface.name + ")"
+        return self.logical_iface.ip.ip.exploded + " (" + \
+               self.logical_iface.phy_iface.name + ")"
 
     def add_neighbor(self, neighbor):
         """Add neighbor object to this interface."""
