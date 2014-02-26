@@ -84,19 +84,19 @@ class DualFsm(object):
     def _enter_active3(self, e):
         self._state = self._states['active3']
 
-    def handle_update(update):
+    def handle_update(self, update):
         self._state.handle_update(update)
 
-    def handle_reply(reply):
+    def handle_reply(self, reply):
         self._state.handle_reply(reply)
 
-    def handle_query(query):
+    def handle_query(self, query):
         self._state.handle_query(query)
 
-    def handle_link_down(linkmsg):
+    def handle_link_down(self, linkmsg):
         self._state.handle_link_down(linkmsg)
 
-    def handle_link_metric_change(linkmsg):
+    def handle_link_metric_change(self, linkmsg):
         self._state.handle_link_metric_change(linkmsg)
 
 
@@ -105,7 +105,7 @@ class DualState(object):
 
 
 class StatePassive(DualState):
-    def handle_update(update):
+    def handle_update(self, update):
         # IE2 and IE4, for update pkts.
         #
         # If the update came from the successor:
@@ -134,10 +134,10 @@ class StatePassive(DualState):
         #    Change the neighbor's metric information
         pass
 
-    def handle_reply(request):
+    def handle_reply(self, reply):
         pass
 
-    def handle_query(neighbor, query):
+    def handle_query(self, neighbor, query):
         # IE1 and IE3
         #
         # If query came from successor:
@@ -155,7 +155,7 @@ class StatePassive(DualState):
         #    Send reply to src with our route info
         pass
 
-    def handle_link_down(linkmsg):
+    def handle_link_down(self, linkmsg):
         # IE2 and IE4 for link down changes. Snipped from handle_update,
         # so this can be consolidated in a shared function.
         #
@@ -167,13 +167,149 @@ class StatePassive(DualState):
         #            Else:
         #                # No route to dest. IE4, go to Active.
         #                # XXX Send QRY to all neighbors on all ifaces,
-        #                # Set REPLY status flag to 1 because we're waiting
+        #                # For all neighbors, set REPLY status flag to 1
+        #                # because we're waiting
         #                # for responses. Where do we want to do this?
         #                # Stop using route for routing.
         #            Endif
         #        Endif
         pass
 
-    def handle_link_metric_change(linkmsg):
+    def handle_link_metric_change(self, linkmsg):
         # XXX Would be handled similarly to handle_link_down
+        pass
+
+
+class BaseActive(DualState):
+
+    def __init__(self, *args, **kwargs):
+        DualState.__init__(self, *args, **kwargs)
+        self._received_last_reply = received_last_reply
+
+    def _received_last_reply(self):
+        """Must override in subclass.
+        This function is called when we have received
+        all replies and thus should transition back to passive. This function
+        should handle responding to the old successor if necessary then
+        sending the correct input event to transition back to passive."""
+        assert(False)
+
+    def handle_update(self, update):
+        # If update indicates a metric change:
+        #     IE7. Record the metric information.
+        # Endif
+
+    def handle_reply(self, reply):
+        # IE8 for REPLYs. Clear REPLY flag for this neighbor.
+        # If all neighbors have replied:
+        #    IE13/14/15/16. Call self._received_last_reply
+        # Endif
+        pass
+
+    def handle_query(self, query, neighbor):
+        # If sender is the successor:
+        #     # XXX This can happen in Active0 or Active1 (it's IE5). Should
+        #     # pass in another handler function like _received_last_reply
+        #     # that other states can use to act here. Active2 and 3 should
+        #     # log/ignore it, Active0 and 1 should call IE5 (and also do
+        #     # something?).
+        # Else:
+        #     # Sender is not the successor
+        #     IE6. Send a REPLY. # Record the cost that I send... where and why?
+        # Endif
+
+    def handle_link_metric_change(self, linkmsg):
+        pass
+
+
+class StateActive1(BaseActive):
+
+    # We can have IEs: 5,6,7,8,9,15
+
+    def _received_last_reply(self):
+        # If link to old successor still exists:
+        #     Send reply to old successor.
+        # Endif
+        # IE15. Transition to passive.
+        pass
+
+    def handle_link_down(self, linkmsg):
+        # The relevant link has already failed in Active3 or Passive in order
+        # to get to Active2, so it can't fail again.
+        # (What about if link is flapping, i.e. goes down and then back up and
+        # down again?)
+        pass
+
+class StateActive2(BaseActive):
+
+    # We can have IEs: 6,7,8,12,16
+
+    def _received_last_reply(self):
+        # If there is a feasible successor:
+        #     IE16. Transition to passive.
+        # Else:
+        #     IE12. Transition to Active3.
+        # Endif
+        pass
+
+    def handle_link_down(self, linkmsg):
+        # The relevant link has already failed in Active3 or Passive in order
+        # to get to Active2, so it can't fail again.
+        # (What about if link is flapping, i.e. goes down and then back up and
+        # down again?)
+        pass
+
+
+class StateActive2(BaseActive):
+
+    # We can have IEs: 6,7,8,12,16
+
+    def _received_last_reply(self):
+        # If there is a feasible successor:
+        #     IE16. Transition to passive.
+        # Else:
+        #     IE12. Transition to Active3.
+        # Endif
+        pass
+
+    def handle_link_down(self, linkmsg):
+        # The relevant link has already failed in Active3 or Passive in order
+        # to get to Active2, so it can't fail again.
+        # (What about if link is flapping, i.e. goes down and then back up and
+        # down again?)
+        pass
+
+
+class StateActive3(BaseActive):
+
+    # We can have IEs: 6,7,8,10,13
+
+    def _received_last_reply(self):
+        # Send reply to old successor
+        # IE13. Transition to passive
+        pass
+
+    def handle_link_down(self, linkmsg):
+        # For all neighbors attached to this interface:
+        #     If neighbor is successor:
+        #         IE10. Clear QUERY origin flag
+        #         IE10. Set TRANSITION flag. (See below.)
+        #     Else:
+        #         # Neighbor not successor:
+        #         IE8. Clear neighbor REPLY flag.
+        #     Endif
+        # Endfor
+        #
+        # XXX IE10 and IE13 can happen simultaneously, i.e. a link goes down
+        # and that means we've received all replies from all neighbors.
+        # Do we go to Active2 or Passive state?
+        #
+        # If TRANSITION flag was set above:
+        #     IE10. Transition to Active2 state
+        # Endif
+        #
+        # If all neighbors have replied:
+        #    IE13. Send a REPLY to the old successor
+        #    IE13. Transition to Passive state
+        # Endif
         pass
