@@ -2,6 +2,20 @@
 
 from fysom import Fysom
 
+# Actions that the FSM can request of EIGRP.
+# The current idea is that the FSM returns a list of dicts containing actions
+# that eigrp should perform based on the fsm's processing.
+# Each requested action will be a dict of the form: {action: '...', data: '...'}
+# The data key will contain action-dependent data. For example, if the action
+# requires that a metric be updated, the data will contain the new metric.
+SEND_UPDATE       = 1
+SEND_REPLY        = 2
+SEND_QUERY        = 3
+MODIFY_REPLY_FLAG = 4
+STOP_USING_ROUTE  = 5
+INSTALL_SUCCESSOR = 6
+SET_METRIC        = 7
+
 class DualFsm(object):
 
     # Input events. See RFC pages 11-12.
@@ -222,6 +236,38 @@ class BaseActive(DualState):
         pass
 
 
+class StateActive0(BaseActive):
+
+    # We can have IEs: 5,6,7,8,9,11
+
+    # XXX Handle IE 5 and 6 in BaseActive. See BaseActive.handle_query
+
+    def _received_last_reply(self):
+        # If link to old successor still exists:
+        #     Send reply to old successor.
+        # Endif
+        # IE14. Transition to passive.
+        pass
+
+    def handle_link_down(self, linkmsg):
+        # The relevant link has already failed in Active3 or Passive in order
+        # to get to Active2, so it can't fail again.
+        # (What about if link is flapping, i.e. goes down and then back up and
+        # down again?)
+        pass
+
+    def handle_link_metric_change(self, linkmsg):
+        # XXX
+        # If link cost to successor increased:
+        #   If last REPLY was received from all neighbors:
+        #     If there is no feasible successor:
+        #       IE11.
+        #       Route stays in active. Transition to Active1.
+        #       Send QUERY to all neighbors.
+        #       Set QUERY origin flag to 1.
+        pass
+
+
 class StateActive1(BaseActive):
 
     # We can have IEs: 5,6,7,8,9,15
@@ -239,26 +285,6 @@ class StateActive1(BaseActive):
         # (What about if link is flapping, i.e. goes down and then back up and
         # down again?)
         pass
-
-class StateActive2(BaseActive):
-
-    # We can have IEs: 6,7,8,12,16
-
-    def _received_last_reply(self):
-        # If there is a feasible successor:
-        #     IE16. Transition to passive.
-        # Else:
-        #     IE12. Transition to Active3.
-        # Endif
-        pass
-
-    def handle_link_down(self, linkmsg):
-        # The relevant link has already failed in Active3 or Passive in order
-        # to get to Active2, so it can't fail again.
-        # (What about if link is flapping, i.e. goes down and then back up and
-        # down again?)
-        pass
-
 
 class StateActive2(BaseActive):
 

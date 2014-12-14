@@ -29,14 +29,60 @@ import struct
 import binascii
 import time
 import ipaddr
-from twisted.internet import protocol, base
+from twisted.internet import protocol
+from twisted.internet import base
 from twisted.python import log
 
+import rtp
 import sysiface
 import util
 from tw_baseiptransport import reactor
-from tlv import TLVFactory, TLVParam
-import rtp
+from tlv import TLVFactory
+from tlv import TLVParam
+
+class TopologyEntry(object):
+    """A topology entry contains the FSM object used for a given prefix,
+    plus all neighbors that have advertised this prefix. The prefix
+    itself is expected to be stored as the key in the dictionary for which
+    this object is a value. Example usage:
+    - For initialization example, see eigrp._init_routes
+
+    - Neighbor lookup:
+        # Neighbor lookup.
+        try:
+            neighbor_info = topology[prefix].get_neighbor(neighbor)
+        except KeyError:
+            print("Neighbor not found.")
+            return
+        print(neighbor_info.neighbor)
+        print(neighbor_info.reported_distance)
+        print(neighbor_info.reply_flag)
+    """
+
+    def __init__(self, fsm):
+        """fsm - a DualFsm object"""
+        self.fsm = fsm
+        self.neighbors = dict()
+
+    def add_neighbor(self, neighbor, reported_distance):
+        self.neighbors[neighbor] = ToplogyNeighborInfo(neighbor,
+                                                       reported_distance)
+
+    def get_neighbor(self, neighbor):
+        return self.neighbors[neighbor]
+
+
+class TopologyNeighborInfo(object):
+    def __init__(self, neighbor, reported_distance):
+        """neighbor - an RTPNeighbor instance (None for "locally" known routes)
+        reported_distance - the distance advertised by the neighbor
+        """
+        # Note that the interface on which a neighbor was observed is stored
+        # within the RTPNeighbor instance.
+        self.neighbor          = neighbor
+        self.reported_distance = reported_distance
+        self.reply_flag        = True
+
 
 class EIGRP(rtp.ReliableTransportProtocol):
 
@@ -71,10 +117,33 @@ class EIGRP(rtp.ReliableTransportProtocol):
             self._k4 = self.DEFAULT_KVALUES[3]
             self._k5 = self.DEFAULT_KVALUES[4]
 
+        self._topology = dict()
         self._register_op_handlers()
         for iface in requested_ifaces:
             self.activate_iface(iface)
+        self._init_routes(import_routes, routes)
         #eigrpadmin.run(self, port=admin_port)
+
+    def _init_routes(self, import_routes, requested_routes):
+        routes = list()
+        if import_routes:
+            # XXX
+            # imported_routes = ...
+            # routes += imported_routes
+            pass
+
+        routes += requested_routes
+
+        for route in routes:
+            if not type(route) == ipaddr.IPv4Network:
+                raise TypeError("Routes are expected to be of type "
+                                "ipaddr.IPv4Network")
+            if not route in self._topology:
+                fsm = dualfsm.DualFsm()
+                self._topology[route] = ToplogyEntry(fsm)
+            # Local routes use None as the neighbor and 0 as the RD.
+            self._topology[route].add_neighbor(neighbor=None,
+                                               reported_distance=0)
 
     def _init_logging(self, log_config):
         # debug1 is less verbose, debug5 is more verbose.
