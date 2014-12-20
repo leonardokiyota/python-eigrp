@@ -40,12 +40,36 @@ from tw_baseiptransport import reactor
 from tlv import TLVFactory
 from tlv import TLVParam
 
+class TopologyTable(object):
+    """A container for TopologyEntry instances."""
+
+    def __init__(self):
+        self._topology = dict()
+
+    def update_prefix(self, prefix, neighbor, reported_distance):
+        """Update information about a neighbor for the given prefix in the
+        topology table."""
+        if not type(prefix) == ipaddr.IPv4Network:
+            raise TypeError("prefixs are expected to be of type "
+                            "ipaddr.IPv4Network")
+        if not prefix in self._topology:
+            fsm = dualfsm.DualFsm()
+            self._topology[prefix] = ToplogyEntry(fsm)
+        self._topology[prefix].update_neighbor(neighbor, reported_distance)
+
+    def del_prefix(self, prefix, neighbor):
+        pass
+
+    def get_prefix(self, prefix):
+        pass
+
+
 class TopologyEntry(object):
     """A topology entry contains the FSM object used for a given prefix,
     plus all neighbors that have advertised this prefix. The prefix
     itself is expected to be stored as the key in the dictionary for which
     this object is a value. Example usage:
-    - For initialization example, see eigrp._init_routes
+    - For initialization example, see TopologyTable.update_prefix
 
     - Neighbor lookup:
         # Neighbor lookup.
@@ -61,15 +85,25 @@ class TopologyEntry(object):
 
     def __init__(self, fsm):
         """fsm - a DualFsm object"""
-        self.fsm = fsm
-        self.neighbors = dict()
+        self._fsm = fsm
+        self._neighbors = dict()
 
-    def add_neighbor(self, neighbor, reported_distance):
-        self.neighbors[neighbor] = ToplogyNeighborInfo(neighbor,
-                                                       reported_distance)
+    def update_neighbor(self, neighbor, reported_distance):
+        """Add a new neighbor for this prefix, or update an existing
+        neighbor's reported distance.
+        Take the appropriate action in the fsm.
+        Returns the fsm's return value."""
+        if not neighbor in self._neighbors:
+            self._neighbors[neighbor] = ToplogyNeighborInfo(neighbor,
+                                                           reported_distance)
+        # XXX Check if reported distance decreased etc, call into fsm as
+        # necessary.
 
     def get_neighbor(self, neighbor):
-        return self.neighbors[neighbor]
+        """Throws KeyError if neighbor not found.
+        Note that None designates the "local neighbor", not the absence of
+        a neighbor."""
+        return self._neighbors[neighbor]
 
 
 class TopologyNeighborInfo(object):
@@ -117,7 +151,7 @@ class EIGRP(rtp.ReliableTransportProtocol):
             self._k4 = self.DEFAULT_KVALUES[3]
             self._k5 = self.DEFAULT_KVALUES[4]
 
-        self._topology = dict()
+        self._topology = TopologyTable()
         self._register_op_handlers()
         for iface in requested_ifaces:
             self.activate_iface(iface)
@@ -133,17 +167,11 @@ class EIGRP(rtp.ReliableTransportProtocol):
             pass
 
         routes += requested_routes
-
         for route in routes:
-            if not type(route) == ipaddr.IPv4Network:
-                raise TypeError("Routes are expected to be of type "
-                                "ipaddr.IPv4Network")
-            if not route in self._topology:
-                fsm = dualfsm.DualFsm()
-                self._topology[route] = ToplogyEntry(fsm)
             # Local routes use None as the neighbor and 0 as the RD.
-            self._topology[route].add_neighbor(neighbor=None,
-                                               reported_distance=0)
+            self._topology.add_route(prefix=route,
+                                     neighbor=None,
+                                     reported_distance=0)
 
     def _init_logging(self, log_config):
         # debug1 is less verbose, debug5 is more verbose.
@@ -177,19 +205,35 @@ class EIGRP(rtp.ReliableTransportProtocol):
         self._op_handlers[self._rtphdr.OPC_SIAQUERY] = self._eigrp_op_handler_siaquery
         self._op_handlers[self._rtphdr.OPC_SIAREPLY] = self._eigrp_op_handler_siareply
 
-    def _eigrp_op_handler_update(self, addr, hdr, tlvs):
+    def _eigrp_op_handler_update(self, neighbor, hdr, tlvs):
         self.log.debug("Processing UPDATE")
+        for tlv in tlvs:
+            if tlv.type == rtptlv.TLVInternal4.TYPE:
+                self._op_update_handle_tlvinternal4(neighbor, hdr, tlv)
+                pass
+            else:
+                self.log.debug("Unexpected TLV type in UPDATE: {}" % tlv)
+                return
 
-    def _eigrp_op_handler_request(self, addr, hdr, tlvs):
+    def _op_update_handler_tlvinternal4(neighbor, hdr, tlv):
+        """Handle an IPv4 Internal TLV within an UPDATE packet."""
+        # TLVInternal4 attributes: nexthop, metric, dest
+        cidr = ipaddr.IPv4Network("%s/%d" % (tlv.dest.exploded, tlv.plen))
+        try:
+            self._topology[cidr]
+        except
+        tlv.nexthop
+
+    def _eigrp_op_handler_request(self, neighbor, hdr, tlvs):
         self.log.debug("Processing REQUEST")
 
-    def _eigrp_op_handler_query(self, addr, hdr, tlvs):
+    def _eigrp_op_handler_query(self, neighbor, hdr, tlvs):
         self.log.debug("Processing QUERY")
 
-    def _eigrp_op_handler_reply(self, addr, hdr, tlvs):
+    def _eigrp_op_handler_reply(self, neighbor, hdr, tlvs):
         self.log.debug("Processing REPLY")
 
-    def _eigrp_op_handler_hello(self, addr, hdr, tlvs):
+    def _eigrp_op_handler_hello(self, neighbor, hdr, tlvs):
         """RTP deals with HELLOs, nothing to do here."""
         pass
 
@@ -205,10 +249,10 @@ class EIGRP(rtp.ReliableTransportProtocol):
         pkt = RTPPacket(hdr, tlvs)
         neighbor.pushmsg(pkt)
 
-    def _eigrp_op_handler_siaquery(self, addr, hdr, data):
+    def _eigrp_op_handler_siaquery(self, neighbor, hdr, data):
         self.log.debug("Processing SIAQUERY")
 
-    def _eigrp_op_handler_siareply(self, addr, hdr, data):
+    def _eigrp_op_handler_siareply(self, neighbor, hdr, data):
         self.log.debug("Processing SIAREPLY")
 
     def run(self):
@@ -247,9 +291,9 @@ class EIGRP(rtp.ReliableTransportProtocol):
             handler = self._op_handlers[hdr.opcode]
         except KeyError:
             self.log.info("Received invalid/unhandled opcode %d from %s" % \
-                          (hdr.opcode, addr))
+                          (hdr.opcode, neighbor))
             return
-        handler(addr, hdr, tlvs)
+        handler(neighbor, hdr, tlvs)
         self.log.debug("Finished handling opcode.")
 
 

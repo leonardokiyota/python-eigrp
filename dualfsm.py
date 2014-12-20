@@ -156,7 +156,7 @@ class StatePassive(DualState):
         #
         # If query came from successor:
         #    If we have a feasible successor:
-        #        # XXX
+        #        # XXX Install route and go into passive? Send update?
         #    Else:
         #        # IE3, no feasible successor
         #        Transition to Active3 state
@@ -196,10 +196,6 @@ class StatePassive(DualState):
 
 class BaseActive(DualState):
 
-    def __init__(self, *args, **kwargs):
-        DualState.__init__(self, *args, **kwargs)
-        self._received_last_reply = received_last_reply
-
     def _received_last_reply(self):
         """Must override in subclass.
         This function is called when we have received
@@ -212,6 +208,7 @@ class BaseActive(DualState):
         # If update indicates a metric change:
         #     IE7. Record the metric information.
         # Endif
+        pass
 
     def handle_reply(self, reply):
         # IE8 for REPLYs. Clear REPLY flag for this neighbor.
@@ -231,6 +228,7 @@ class BaseActive(DualState):
         #     # Sender is not the successor
         #     IE6. Send a REPLY. # Record the cost that I send... where and why?
         # Endif
+        pass
 
     def handle_link_metric_change(self, linkmsg):
         pass
@@ -253,7 +251,18 @@ class StateActive0(BaseActive):
         # The relevant link has already failed in Active3 or Passive in order
         # to get to Active2, so it can't fail again.
         # (What about if link is flapping, i.e. goes down and then back up and
-        # down again?)
+        # down again? How do we handle the link going up?
+        # Two cases to worry about:
+        # 1. The link that failed is the network that we're 'active' for.
+        # 2. The link that failed connects to a neighbor that advertised a
+        #    route for which we're now in 'active'.
+        # In case 1:
+        #    ?
+        # In case 2:
+        #    We'd establish an adjacency with the neighbor, then get an
+        #    UPDATE for the active network. This is handled in
+        #    BaseActive.handle_update as IE7. We record the updated metric
+        #    info as part of IE7 and do nothing further at that time.
         pass
 
     def handle_link_metric_change(self, linkmsg):
@@ -285,6 +294,7 @@ class StateActive1(BaseActive):
         # (What about if link is flapping, i.e. goes down and then back up and
         # down again?)
         pass
+
 
 class StateActive2(BaseActive):
 

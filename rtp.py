@@ -918,7 +918,7 @@ class RTPNeighbor(object):
         else:
             # I think we should drop the neighbor if we can't transmit to it.
             # DUAL won't operate correctly if RTP drops a sequenced
-            # messages.
+            # message.
             self.log.debug("Retransmit timer exceeded, dropping neighbor.")
             self._drop_event.cancel()
             self._drop_self()

@@ -3,7 +3,6 @@
 import struct
 import ipaddr
 
-
 class ValueMetaclass(type):
     """Convenience metaclass for values in the TLV.
     Forces the format string to network byte ordering, calculates the
