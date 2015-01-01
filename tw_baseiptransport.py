@@ -32,7 +32,7 @@
 import struct
 import socket
 import sys
-from twisted.internet import fdesc, base, udp, main, reactor
+from twisted.internet import fdesc, udp, reactor
 from twisted.python import log
 from twisted.internet.main import installReactor
 

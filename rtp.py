@@ -13,17 +13,17 @@
 # For the rest of it:
 # Python-EIGRP (http://python-eigrp.googlecode.com)
 # Copyright (C) 2013 Patrick F. Allen
-# 
+#
 # This program is free software; you can redistribute it and/or
 # modify it under the terms of the GNU General Public License
 # as published by the Free Software Foundation; either version 2
 # of the License, or (at your option) any later version.
-# 
+#
 # This program is distributed in the hope that it will be useful,
 # but WITHOUT ANY WARRANTY; without even the implied warranty of
 # MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 # GNU General Public License for more details.
-# 
+#
 # You should have received a copy of the GNU General Public License
 # along with this program; if not, write to the Free Software
 # Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
@@ -74,18 +74,18 @@ class ReliableTransportProtocol(protocol.DatagramProtocol):
         if hdrver == 2:
             self._rtphdr = RTPHeader2
         else:
-            raise(ValueError("Unsupported header version: {}".format(hdrver)))
+            raise ValueError("Unsupported header version: {}".format(hdrver))
 
         self._init_ifaces()
         asn_rid_err_msg = "{} must be a positive number less than 65536."
         if not isinstance(rid, int):
-            raise(TypeError(asn_rid_err_msg.format("Router ID")))
-        if not (0 <= rid < 65536):
-            raise(ValueError(asn_rid_err_msg.format("Router ID")))
+            raise TypeError(asn_rid_err_msg.format("Router ID"))
+        if not 0 <= rid < 65536:
+            raise ValueError(asn_rid_err_msg.format("Router ID"))
         if not isinstance(asn, int):
-            raise(TypeError(asn_rid_err_msg.format("AS Number")))
-        if not (0 <= asn < 65536):
-            raise(ValueError(asn_rid_err_msg.format("AS Number")))
+            raise TypeError(asn_rid_err_msg.format("AS Number"))
+        if not 0 <= asn < 65536:
+            raise ValueError(asn_rid_err_msg.format("AS Number"))
         self._rid = rid
         self._asn = asn
         self.__ht_multiplier = self.DEFAULT_HT_MULTIPLIER
@@ -97,7 +97,7 @@ class ReliableTransportProtocol(protocol.DatagramProtocol):
         # in theory be set to a max of 65535/HT_MULTIPLIER. Since this is
         # measured in seconds, in reality it will be set much shorter.
         max_hello_interval = 65535 / self.__ht_multiplier
-        if not (1 <= hello_interval <= max_hello_interval):
+        if not 1 <= hello_interval <= max_hello_interval:
             raise(ValueError("hello_interval must be between 1 and "
                              "{}".format(max_hello_interval)))
 
@@ -113,17 +113,17 @@ class ReliableTransportProtocol(protocol.DatagramProtocol):
             self._k4 = 0
             self._k5 = 0
         elif len(kvalues) != 5:
-            raise(ValueError("Exactly 5 K-values must be present."))
+            raise ValueError("Exactly 5 K-values must be present.")
         elif not sum(kvalues):
-            raise(ValueError("At least one kvalue must be non-zero."))
+            raise ValueError("At least one kvalue must be non-zero.")
         else:
             try:
                 for k in kvalues:
-                    if not (0 <= k <= 255):
-                        raise(ValueError("Each kvalue must be between 0 and "
-                                         "255."))
+                    if not 0 <= k <= 255:
+                        raise ValueError("Each kvalue must be between 0 and "
+                                         "255.")
             except TypeError:
-                raise(TypeError("kvalues must be an iterable."))
+                raise TypeError("kvalues must be an iterable.")
             self._k1 = kvalues[0]
             self._k2 = kvalues[1]
             self._k3 = kvalues[2]
@@ -146,8 +146,8 @@ class ReliableTransportProtocol(protocol.DatagramProtocol):
                 iface.activated = True
                 self.log.debug("Activated iface {}".format(req_iface))
                 return
-        raise(ValueError("Requested IP %s is unusable. (Is it assigned to this"
-                         " machine on a usable interface?)" % req_iface))
+        raise ValueError("Requested IP %s is unusable. (Is it assigned to this"
+                         " machine on a usable interface?)" % req_iface)
 
     def _init_logging(self, configfile):
         util.create_extended_debug_log_levels()
@@ -189,7 +189,7 @@ class ReliableTransportProtocol(protocol.DatagramProtocol):
 
     def __rtp_found_neighbor(self, neighbor):
         self.log.debug("Neighbor {} UP, iface {}".format(neighbor,
-                       neighbor.iface))
+                                                         neighbor.iface))
         self.foundNeighbor(neighbor)
 
     def __rtp_lost_neighbor(self, neighbor, send_upper):
@@ -197,7 +197,7 @@ class ReliableTransportProtocol(protocol.DatagramProtocol):
         was lost. We don't tell the upper layer that the neighbor was lost if
         we never said the neigbor was UP to begin with."""
         self.log.debug("Neighbor {} DOWN, iface {}".format(neighbor,
-                       neighbor.iface))
+                                                           neighbor.iface))
         if send_upper:
             self.log.debug("Notifying upper layer.")
             self.lostNeighbor(neighbor)
@@ -264,6 +264,9 @@ class ReliableTransportProtocol(protocol.DatagramProtocol):
         neighbor -- The neighbor to send to
         pkt -- The RTP packet to send
         """
+        # Note: This doesn't handle sequencing. To send sequenced packets to
+        # a neighbor, call RTPNeighbor._pushrtp. That handles the transmission
+        # queue.
         self.log.debug5("Sending unicast to {}: {}".format(neighbor.ip, pkt))
         pkt.hdr.ack = neighbor.next_ack
         neighbor.next_ack = 0
@@ -287,7 +290,7 @@ class ReliableTransportProtocol(protocol.DatagramProtocol):
                 if neighbor.queue_full():
                     seq_ips.append(str(neighbor.ip.packed))
                 # We only really need to copy the hdr since the tlvs won't
-                # change.
+                # change, but copy the whole thing anyway.
                 neighbor.schedule_multicast_retransmission(copy.deepcopy(pkt))
             if seq_ips:
                 self.__send_seq_tlv(iface, seq_ips, pkt.hdr.seq)
@@ -375,12 +378,12 @@ class ReliableTransportProtocol(protocol.DatagramProtocol):
         except struct.error:
             bytes_to_print = self._rtphdr.LEN
             self.log.warn("Received malformed datagram from {}. Hexdump of "
-                          "first {} bytes: {}".format((addr, bytes_to_print, \
-                          binascii.hexlify(data[:bytes_to_print]))))
+                          "first {} bytes: {}".format(addr, bytes_to_print, \
+                          binascii.hexlify(data[:bytes_to_print])))
             return
 
         # RFC 1071:
-        # To check a checksum, the 1's complement sum is computed over the
+        # "To check a checksum, the 1's complement sum is computed over the
         # same set of octets, including the checksum field.  If the result
         # is all 1 bits (-0 in 1's complement arithmetic), the check
         # succeeds."
@@ -389,7 +392,7 @@ class ReliableTransportProtocol(protocol.DatagramProtocol):
             return
         if hdr.ver != self._rtphdr.VER:
             self.log.debug("Received incompatible header version "
-                           "{}.".format(hdr.VER, addr))
+                           "{} from addr {}.".format(hdr.VER, addr))
             return
 
         payload = data[self._rtphdr.LEN:]
@@ -554,19 +557,19 @@ class RTPHeader2(object):
                              " are required."))
 
     def __str__(self):
-        return("RTPHeader2(ver={version}, " 
+        return("RTPHeader2(ver={version}, "
                           "opc={opcode}, "
                           "flg={flags}, "
                           "seq={seq}, "
                           "ack={ack}, "
                           "asn={asn}, "
                           "rid={rid})".format(version=self.ver,
-                                             opcode=self.opcode,
-                                             flags=self.flags,
-                                             seq=self.seq,
-                                             ack=self.ack,
-                                             asn=self.asn,
-                                             rid=self.rid))
+                                              opcode=self.opcode,
+                                              flags=self.flags,
+                                              seq=self.seq,
+                                              ack=self.ack,
+                                              asn=self.asn,
+                                              rid=self.rid))
 
     def unpack(self, raw):
         """Note that self.ver could be different than self.VER if you use
@@ -669,7 +672,8 @@ class RTPNeighbor(object):
 
     def receive(self, hdr, tlvs):
         """Deals with updating last heard time and processing ACKs.
-        Sends to PENDING or 
+        Sends hdr and tlvs to _pending_receive if in PENDING state, or
+        _up_receive when adjacency is fully formed.
 
         Returns one of:
             RTPNeighbor.PROCESS if the packet should be processed by the upper
@@ -860,7 +864,7 @@ class RTPNeighbor(object):
         if not self._peekrtp():
             self._seq_to = pkt.hdr.seq
             self._retransmit_event = reactor.callLater(self._retransmit_timer,
-                                                self._retransmit, time.time())
+                                                 self._retransmit, time.time())
         self._queue.appendleft(pkt)
 
     def send(self, opcode, tlvs, ack, flags=0):
@@ -874,9 +878,22 @@ class RTPNeighbor(object):
         set ack/seq values in the RTP header, which means this packet
         effectively behaves like UDP.
         """
+        # XXX I've looked at this before, but it would be really nice to make
+        # the _write function (__send_rtp_unicast) responsible for calling
+        # _make_pkt so that (a) I don't need to pass in a _make_pkt function,
+        # and (b) so that RTPNeighbor behaves the same as RTPInterface when
+        # sending a packet. I remember having a reason that I didn't do it that
+        # way, perhaps something to do with needing ack to be set beforehand,
+        # but I don't recall why now.
+        #
+        # If the usage must be different, it should be called out and
+        # documented better because it is potentially confusing.
         pkt = self._make_pkt(opcode, tlvs, ack, flags)
         if not ack:
-            self._write(self, pkt)
+            # If an ack is not required, just send the packet.
+            # Note that we pass in "self" as the neighbor argument.
+            self._write(neighbor=self,
+                        pkt=pkt)
         else:
             self._pushrtp(pkt)
 
@@ -893,7 +910,9 @@ class RTPNeighbor(object):
         be used for packets that require an acknowledgement."""
         if not self._peekrtp():
             self._seq_to = pkt.hdr.seq
-            self._write(self, pkt)
+            # Note that we pass in "self" as the neighbor argument.
+            self._write(neighbor=self,
+                        pkt=pkt)
             self._retransmit_event = reactor.callLater(self._retransmit_timer,
                                                 self._retransmit, time.time())
         self._queue.appendleft(pkt)
@@ -914,7 +933,9 @@ class RTPNeighbor(object):
         if init_time + self._max_retransmit_seconds > \
                        time.time() + self._retransmit_timer:
             self._retransmit_event = reactor.callLater(self._retransmit_timer,
-                                           self._retransmit, init_time, False)
+                                                       self._retransmit,
+                                                       init_time,
+                                                       False)
         else:
             # I think we should drop the neighbor if we can't transmit to it.
             # DUAL won't operate correctly if RTP drops a sequenced
@@ -980,4 +1001,9 @@ class RTPInterface(object):
         """
         # Check if self.activated?
         # Stats (multicast packets sent)?
-        self._write(self, opcode, tlvs, ack)
+        # Call _send_rtp_multicast. Note that we pass in 'self' as the iface
+        # argument.
+        self._write(iface=self,
+                    opcode=opcode,
+                    tlvs=tlvs,
+                    ack=ack)

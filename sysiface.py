@@ -2,28 +2,32 @@
 
 """Interface to the OS."""
 
-# Copyright (C) 2012 Patrick F. Allen 
-#  
-# This program is free software; you can redistribute it and/or 
-# modify it under the terms of the GNU General Public License 
-# as published by the Free Software Foundation; either version 2 
-# of the License, or (at your option) any later version. 
-#  
-# This program is distributed in the hope that it will be useful, 
-# but WITHOUT ANY WARRANTY; without even the implied warranty of 
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the 
-# GNU General Public License for more details. 
-#  
-# You should have received a copy of the GNU General Public License 
-# along with this program; if not, write to the Free Software 
+# Copyright (C) 2012 Patrick F. Allen
+#
+# This program is free software; you can redistribute it and/or
+# modify it under the terms of the GNU General Public License
+# as published by the Free Software Foundation; either version 2
+# of the License, or (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program; if not, write to the Free Software
 # Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
 
 import sys
 import subprocess
 import re
-import util
 
 import ipaddr
+
+# subprocess.check_output doesn't exist in 2.6, haven't looked at 3.x.
+# Have done all testing on 2.7, so it's safer to just require 2.7 for now.
+if not 0x2070000 <= sys.hexversion < 0x2080000:
+    raise ImportError("sysiface module requires Python 2.7.")
 
 class _System(object):
     """Abstract class for OS-specific functions. These are all the OS-specific
@@ -49,7 +53,7 @@ class _System(object):
         """Clean up the system. Called when exiting.
 
         Override in subclass."""
-        assert(False)
+        assert False
 
     def update_interface_info(self):
         """Updates self according to the current state of physical and logical
@@ -60,19 +64,19 @@ class _System(object):
         PhysicalInterface and LogicalInterface classes for examples.
 
         Override in subclass."""
-        assert(False)
+        assert False
 
     def uninstall_route(self, net, mask):
         """Uninstall a route from the system routing table.
 
         Override in subclass."""
-        assert(False)
+        assert False
 
     def install_route(self, net, preflen, metric, nexthop):
         """Install a route in the system routing table.
 
         Override in subclass."""
-        assert(False)
+        assert False
 
     def get_local_routes(self):
         """Retrieves routes from the system routing table.
@@ -80,7 +84,7 @@ class _System(object):
         Return value is a list of (address, mask) tuples defining local routes.
 
         Override in subclass."""
-        assert(False)
+        assert False
 
     def is_self(self, host):
         """Determines if an IP address belongs to the local machine.
@@ -95,10 +99,11 @@ class _System(object):
 class WindowsSystem(_System):
     """The Windows system interface."""
 
-    CMD_BASE = "route %(action)s"
-    OPTS_BASE = " %(network)s mask %(mask)s"
-    ROUTE_DEL = CMD_BASE % {"action": "delete"} + OPTS_BASE
-    ROUTE_ADD = CMD_BASE % {"action": "add"} + OPTS_BASE + " %(nh)s metric %(metric)d"
+    # TODO Recently updated to handle non-string arguments. Needs testing.
+    CMD_BASE = "route {}"
+    OPTS_BASE = " {} mask {}"
+    ROUTE_DEL = CMD_BASE.format("delete") + OPTS_BASE
+    ROUTE_ADD = CMD_BASE.format("add")    + OPTS_BASE + " {} metric {}"
 
     def init_routing(self):
         # XXX This should also handle:
@@ -121,7 +126,7 @@ class WindowsSystem(_System):
         self.phy_ifaces.append(PhysicalInterface("GenericWindowsPhy", None))
         masks = re.findall("Subnet Mask.*: (.*)\r", ipconfig_output)
         ips = re.findall("IPv4 Address.*: (.*)\r", ipconfig_output)
-        assert(len(ips) == len(masks))
+        assert len(ips) == len(masks)
         mapper = lambda ip, mask: ip + "/" + mask
 
         for net in map(mapper, ips, masks):
@@ -131,24 +136,20 @@ class WindowsSystem(_System):
     def uninstall_route(self, net, preflen):
         # Convert the prefix length into a dotted decimal mask
         mask = self.preflen_to_snmask(preflen)
-        cmd = self.ROUTE_DEL % { "network": net,
-                                 "mask": mask,
-                               }
+        cmd = self.ROUTE_DEL.format(net, mask)
         output = subprocess.check_output(cmd, stderr=subprocess.STDOUT)
         if not "OK!" in output:
-            raise ModifyRouteError("uninstall", output)
+            raise ValueError #ModifyRouteError("uninstall", output)
 
     def install_route(self, net, preflen, metric, nexthop):
         mask = self.preflen_to_snmask(preflen)
-        cmd = self.ROUTE_ADD % { "network": net,
-                                 "mask":    mask,
-                                 "metric":  metric,
-                                 "nh":      nexthop,
-                               }
-
+        cmd = self.ROUTE_ADD.format(net,
+                                    mask,
+                                    nexthop,
+                                    metric)
         output = subprocess.check_output(cmd, stderr=subprocess.STDOUT)
         if not "OK!" in output:
-            raise ModifyRouteError("uninstall", output)
+            raise ValueError #ModifyRouteError("uninstall", output)
 
     @staticmethod
     def preflen_to_snmask(preflen):
@@ -163,22 +164,22 @@ class WindowsSystem(_System):
             rtinfo = rtline.split()
             dst_network = rtinfo[0]
             mask = rtinfo[1]
-            parsed_network = ipaddr.IPv4Network(dst_network + "/" + mask)
-            if rt.network.ip.is_loopback   or \
-               rt.network.ip.is_link_local or \
-               rt.network.ip.is_multicast  or \
-               rt.network.ip.exploded == "255.255.255.255":
+            rt = ipaddr.IPv4Network(dst_network + "/" + mask)
+            if rt.ip.is_loopback   or \
+               rt.ip.is_link_local or \
+               rt.ip.is_multicast  or \
+               rt.ip.exploded == "255.255.255.255":
                 continue
-            yield (parsed_network.ip.exploded, parsed_network.netmask.exploded)
+            yield (rt.ip.exploded, rt.netmask.exploded)
 
 
 class LinuxSystem(_System):
     """The Linux system interface."""
 
     IP_CMD = "/sbin/ip"
-    RT_DEL_ARGS = "route del %(net)s/%(mask)s"
-    RT_ADD_ARGS = "route add %(net)s/%(mask)s via %(nh)s metric %(metric)d " \
-                  "table %(table)d" 
+    RT_DEL_ARGS = "route del {}/{}"
+    RT_ADD_ARGS = "route add {}/{} via {} metric {} " \
+                  "table {}"
 
     def __init__(self, table=52, priority=1000, *args, **kwargs):
         """Args:
@@ -189,10 +190,10 @@ class LinuxSystem(_System):
             platform"""
         super(_System, self).__thisclass__.__init__(self, *args, **kwargs)
 
-        if not (0 < table < 255):
-            raise(ValueError)
-        if not (0 < priority < 32767):
-            raise(ValueError)
+        if not 0 < table < 255:
+            raise ValueError
+        if not 0 < priority < 32767:
+            raise ValueError
 
         self._table = table
         self._priority = priority
@@ -211,7 +212,7 @@ class LinuxSystem(_System):
         try:
             output = subprocess.check_output(cmd, stderr=subprocess.STDOUT)
         except subprocess.CalledProcessError:
-            raise #(ModifyRouteError("rule_install"))
+            raise ValueError #(ModifyRouteError("rule_install"))
 
     def _uninstall_rule(self):
         cmd = [self.IP_CMD] + ("rule del priority %d table %d" % \
@@ -219,7 +220,7 @@ class LinuxSystem(_System):
         try:
             output = subprocess.check_output(cmd, stderr=subprocess.STDOUT)
         except subprocess.CalledProcessError:
-            raise #(ModifyRouteError("rule_install"))
+            raise ValueError #(ModifyRouteError("rule_install"))
 
     def update_interface_info(self):
         """Updates self according to the current state of physical and logical
@@ -236,7 +237,6 @@ class LinuxSystem(_System):
         for iface in raw_ifaces:
             name = re.match("(.*):", iface).group(1)
             flags = re.search("<(\S*)> ", iface).group(1).split(",")
-            addrs = []
             phy_iface = PhysicalInterface(name, flags)
             self.phy_ifaces.append(phy_iface)
             for addr in re.findall("\n\s*inet (\S*)", iface):
@@ -244,27 +244,25 @@ class LinuxSystem(_System):
                 self.logical_ifaces.append(logical_iface)
 
     def uninstall_route(self, net, preflen):
-        cmd = [self.IP_CMD] + ("route del %s/%s table %d" % \
-               (net, preflen, self._table)).split()
+        cmd = [self.IP_CMD] + ("route del {}/{} table {}".format(net, preflen, self._table).split())
         try:
             output = subprocess.check_output(cmd, stderr=subprocess.STDOUT)
         except subprocess.CalledProcessError:
-            raise #ModifyRouteError("route_uninstall", output)
+            raise ValueError #ModifyRouteError("route_uninstall", output)
 
     def install_route(self, net, preflen, metric, nexthop):
-        cmd = [self.IP_CMD] + ("route add %s/%s via %s metric %d table %d" % \
-               (net, preflen, nexthop, metric, self._table)).split()
+        cmd = [self.IP_CMD] + ("route add {}/{} via {} metric {} table {}".format(net, preflen, nexthop, metric, self._table).split())
         try:
             output = subprocess.check_output(cmd, stderr=subprocess.STDOUT)
         except subprocess.CalledProcessError:
-            raise #ModifyRouteError("route_install", output)
+            raise ValueError #ModifyRouteError("route_install", output)
 
     def get_local_routes(self):
         cmd = [self.IP_CMD] + "route show".split()
         try:
             output = subprocess.check_output(cmd, stderr=subprocess.STDOUT)
         except subprocess.CalledProcessError:
-            raise #ModifyRouteError("route_install", output)
+            raise ValueError #ModifyRouteError("route_install", output)
         for route in output.splitlines():
             dst_network = route.split()[0]
 
@@ -281,16 +279,16 @@ class LinuxSystem(_System):
 
 
 class PhysicalInterface(object):
-    def __init__(self, name, flags): 
-        self.name = name 
-        self._flags = flags 
+    def __init__(self, name, flags):
+        self.name = name
+        self._flags = flags
  
  
 class LogicalInterface(object):
-    def __init__(self, phy_iface, ip, metric=1): 
-        self.phy_iface = phy_iface 
-        self.ip = ipaddr.IPv4Network(ip) 
-        self.metric = metric 
+    def __init__(self, phy_iface, ip, metric=1):
+        self.phy_iface = phy_iface
+        self.ip = ipaddr.IPv4Network(ip)
+        self.metric = metric
 
 
 class SystemFactory(object):
@@ -302,7 +300,7 @@ class SystemFactory(object):
         elif sys.platform == "win":
             self.system = WindowsSystem
         else:
-            raise(NotSupported("No support for platform %s." % sys.platform))
+            raise ValueError("No support for platform %s." % sys.platform)
 
-    def build(self, *args, **kwargs):
-        return self.system(*args, **kwargs)
+    def build(self):
+        return self.system(*self.args, **self.kwargs)

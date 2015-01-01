@@ -1,5 +1,6 @@
 #!/usr/bin/env python
 
+import sys
 import logging
 import os
 import ctypes
@@ -50,18 +51,18 @@ def is_admin():
     and Windows, haven't tried mac. See:
     http://stackoverflow.com/questions/1026431/crossplatform-way-to-check-admin-rights-in-python-script
     """
-    is_admin = False
+    admin = False
     try:
-        is_admin = os.getuid() == 0
+        admin = os.getuid() == 0
     except AttributeError:
         try:
-            is_admin = ctypes.windll.shell32.IsUserAnAdmin() != 0
+            admin = ctypes.windll.shell32.IsUserAnAdmin() != 0
         except AttributeError:
             sys.stderr.write("Unable to check if you are running as a \n"
                              "privileged user. You may be using an \n"
                              "unsupported OS.")
             return False
-    return is_admin
+    return admin
 
 def suppress_reactor_not_running(logfunc=None):
     """Install a Twisted log observer that will remove

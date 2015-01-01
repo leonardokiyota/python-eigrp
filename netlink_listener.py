@@ -3,8 +3,6 @@
 """Minimal netlink route protocol and route attribute processing for Twisted.
 Main purpose is to processing link up/down messages through Twisted."""
 
-import time
-import binascii
 import struct
 from twisted.internet import protocol
 
@@ -125,7 +123,7 @@ class RtAttrCreationError(Exception):
 
 
 class RtAttrFactory(object):
-    def __init__(self, use_default_rtattrs=True, extra_rtattr_classes=[]):
+    def __init__(self, use_default_rtattrs=True, extra_rtattr_classes=None):
         """If use_default_rtattrs is True, factory will register a list of
         all currently defined rtattrs.
         Any extra rtattr classes in extra_rtattr_classes will also be
@@ -235,7 +233,9 @@ class LinuxIfaceEventListener(NetlinkRouteProtocol):
         the interface name will be passed to the appropriate callback
         function."""
         NetlinkRouteProtocol.__init__(self, *args, **kwargs)
-        reactor.listenNetlink(port=RTMGRP_LINK, protocol=self, netlinkType=tw_baseiptransport.NetlinkPort.NETLINK_ROUTE)
+        reactor.listenNetlink(port=RTMGRP_LINK,
+                              protocol=self,
+                              netlinkType=tw_baseiptransport.NetlinkPort.NETLINK_ROUTE)
         self._link_up = link_up_cb
         self._link_down = link_down_cb
 
@@ -271,6 +271,10 @@ class SomeClass(object):
     def link_down(self, name):
         print "Link down: " + name
 
-if __name__ == "__main__":
-    c = SomeClass()
+
+def main():
+    example_cls = SomeClass()
     reactor.run()
+
+if __name__ == "__main__":
+    main()

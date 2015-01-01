@@ -1,5 +1,7 @@
 """Classes for EIGRP TLVs."""
 
+# XXX Is rtptlv the best name for this?
+
 import struct
 import ipaddr
 
@@ -37,13 +39,13 @@ class ValueBase(object):
     def __init__(self, *args, **kwargs):
         """The only expected keyword arg is 'raw'"""
         if kwargs and args:
-            raise(ValueError("Either args or kwargs are expected, not both."))
+            raise ValueError("Either args or kwargs are expected, not both.")
         if "raw" in kwargs:
             self._parse_kwargs(kwargs)
         elif args:
             self._parse_args(args)
         else:
-            raise(ValueError("One of args or kwargs['raw'] is expected."))
+            raise ValueError("One of args or kwargs['raw'] is expected.")
         self._packed = None
 
     def _parse_kwargs(self, kwargs):
@@ -206,20 +208,20 @@ class ValueClassicDest(ValueBase):
 
     def _getpacklen(self, raw):
         if not raw:
-            raise(ValueError("Raw cannot be empty."))
+            raise ValueError("Raw cannot be empty.")
         try:
             plen = struct.unpack("B", raw[0])[0]
         except struct.error:
-            raise(ValueError("Plen argument must be an integer."))
-        if not (0 <= plen <= 32):
-            raise(ValueError("Plen must be between 0 and 32."))
+            raise ValueError("Plen argument must be an integer.")
+        if not 0 <= plen <= 32:
+            raise ValueError("Plen must be between 0 and 32.")
         # +1 is for the prefix length
         return self._getaddrpacklen(plen) + 1
 
     @staticmethod
     def _getaddrpacklen(plen):
         # See A.8.4 of the draft RFC.
-        return ((plen - 1) / 8 + 1)
+        return (plen - 1) / 8 + 1
 
 
 class ValueParam(ValueBase):
@@ -251,7 +253,7 @@ class ValueSeq(ValueBase):
 
     def add_addr(self, addr):
         if len(addr) > self.MAX_ADDR_SIZE:
-            raise(ValueError("Address length exceeds max address size."))
+            raise ValueError("Address length exceeds max address size.")
         self.addrs.append(addr)
 
     def pack(self):
@@ -312,13 +314,13 @@ class TLVBase(object):
         """
         self.type = self.TYPE
         if args and kwargs:
-            raise(ValueError("Either args or kwargs is expected, not both."))
+            raise ValueError("Either args or kwargs is expected, not both.")
         if "raw" in kwargs:
             self._parse_kwargs(kwargs)
         elif args:
             self._parse_args(args)
         else:
-            raise(ValueError("One of args or kwargs['raw'] is expected."))
+            raise ValueError("One of args or kwargs['raw'] is expected.")
 
     def _parse_kwargs(self, kwargs):
         """Override in subclass to parse kwargs for a TLV differently."""
@@ -344,7 +346,7 @@ class TLVBase(object):
         s = type(self).__name__ + "("
         for v in self.VALUES:
             s += str(getattr(self, v.NAME)) + ", "
-        s = s.rstrip(", ") 
+        s = s.rstrip(", ")
         s += ")"
         return s
 
@@ -475,7 +477,7 @@ class TLVFactory(object):
             tlvclasses = list(tlvclasses)
         for tlv in tlvclasses:
             if tlv.TYPE in self._tlvs:
-                raise(ValueError("TLV type %d already registered." % tlv.TYPE))
+                raise ValueError("TLV type %d already registered." % tlv.TYPE)
             self._tlvs[tlv.TYPE] = tlv
 
     def build_all(self, raw):
@@ -495,4 +497,4 @@ class TLVFactory(object):
             _type = self._unpack_hdr(raw)[self._typeindex]
             return self._tlvs[_type](raw=raw)
         except KeyError:
-            raise(ValueError("Unknown type in TLV: %d" % _type))
+            raise ValueError("Unknown type in TLV: %d" % _type)

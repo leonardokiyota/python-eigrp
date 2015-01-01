@@ -1,5 +1,8 @@
 #!/usr/bin/env python
 
+"""The DUAL finite state machine."""
+
+# Get fysom using "pip install fysom"
 from fysom import Fysom
 
 # Actions that the FSM can request of EIGRP.
@@ -15,52 +18,40 @@ MODIFY_REPLY_FLAG = 4
 STOP_USING_ROUTE  = 5
 INSTALL_SUCCESSOR = 6
 SET_METRIC        = 7
+NO_OP             = 8
+
+# Other constants
+# Metric EIGRP uses to indicate inaccessible routes.
+EIGRP_INACCESSIBLE = 0xFFFFFFFFFFFFFFFF
 
 class DualFsm(object):
 
-    # Input events. See RFC pages 11-12.
-    IE1_NAME  = 'IE1'
-    IE2_NAME  = 'IE2'
-    IE3_NAME  = 'IE3'
-    IE4_NAME  = 'IE4'
-    IE5_NAME  = 'IE5'
-    IE6_NAME  = 'IE6'
-    IE7_NAME  = 'IE7'
-    IE8_NAME  = 'IE8'
-    IE9_NAME  = 'IE9'
-    IE10_NAME = 'IE10'
-    IE11_NAME = 'IE11'
-    IE12_NAME = 'IE12'
-    IE13_NAME = 'IE13'
-    IE14_NAME = 'IE14'
-    IE15_NAME = 'IE15'
-    IE16_NAME = 'IE16'
-    
-    DUAL_EVENTS = [ {'name': IE1_NAME,  'src': 'Passive', 'dst': 'Passive'},
-                    {'name': IE2_NAME,  'src': 'Passive', 'dst': 'Passive'},
-                    {'name': IE3_NAME,  'src': 'Passive', 'dst': 'Active3'},
-                    {'name': IE4_NAME,  'src': 'Passive', 'dst': 'Active1'},
-                    {'name': IE5_NAME,  'src': 'Active0', 'dst': 'Active2'},
-                    {'name': IE6_NAME,  'src': 'Active0', 'dst': 'Active0'},
-                    {'name': IE7_NAME,  'src': 'Active0', 'dst': 'Active0'},
-                    {'name': IE8_NAME,  'src': 'Active0', 'dst': 'Active0'},
-                    {'name': IE6_NAME,  'src': 'Active1', 'dst': 'Active1'},
-                    {'name': IE7_NAME,  'src': 'Active1', 'dst': 'Active1'},
-                    {'name': IE8_NAME,  'src': 'Active1', 'dst': 'Active1'},
-                    {'name': IE6_NAME,  'src': 'Active2', 'dst': 'Active2'},
-                    {'name': IE7_NAME,  'src': 'Active2', 'dst': 'Active2'},
-                    {'name': IE8_NAME,  'src': 'Active2', 'dst': 'Active2'},
-                    {'name': IE6_NAME,  'src': 'Active3', 'dst': 'Active3'},
-                    {'name': IE7_NAME,  'src': 'Active3', 'dst': 'Active3'},
-                    {'name': IE8_NAME,  'src': 'Active3', 'dst': 'Active3'},
-                    {'name': IE9_NAME,  'src': 'Active1', 'dst': 'Active0'},
-                    {'name': IE10_NAME, 'src': 'Active3', 'dst': 'Active2'},
-                    {'name': IE11_NAME, 'src': 'Active0', 'dst': 'Active1'},
-                    {'name': IE12_NAME, 'src': 'Active2', 'dst': 'Active3'},
-                    {'name': IE13_NAME, 'src': 'Active3', 'dst': 'Passive'},
-                    {'name': IE14_NAME, 'src': 'Active0', 'dst': 'Passive'},
-                    {'name': IE15_NAME, 'src': 'Active1', 'dst': 'Passive'},
-                    {'name': IE16_NAME, 'src': 'Active2', 'dst': 'Passive'},
+    # Input events. See section 3.5, Dual FSM, in the RFC.
+    DUAL_EVENTS = [ {'name': 'IE1',  'src': 'Passive', 'dst': 'Passive'},
+                    {'name': 'IE2',  'src': 'Passive', 'dst': 'Passive'},
+                    {'name': 'IE3',  'src': 'Passive', 'dst': 'Active3'},
+                    {'name': 'IE4',  'src': 'Passive', 'dst': 'Active1'},
+                    {'name': 'IE5',  'src': 'Active0', 'dst': 'Active2'},
+                    {'name': 'IE6',  'src': 'Active0', 'dst': 'Active0'},
+                    {'name': 'IE7',  'src': 'Active0', 'dst': 'Active0'},
+                    {'name': 'IE8',  'src': 'Active0', 'dst': 'Active0'},
+                    {'name': 'IE6',  'src': 'Active1', 'dst': 'Active1'},
+                    {'name': 'IE7',  'src': 'Active1', 'dst': 'Active1'},
+                    {'name': 'IE8',  'src': 'Active1', 'dst': 'Active1'},
+                    {'name': 'IE6',  'src': 'Active2', 'dst': 'Active2'},
+                    {'name': 'IE7',  'src': 'Active2', 'dst': 'Active2'},
+                    {'name': 'IE8',  'src': 'Active2', 'dst': 'Active2'},
+                    {'name': 'IE6',  'src': 'Active3', 'dst': 'Active3'},
+                    {'name': 'IE7',  'src': 'Active3', 'dst': 'Active3'},
+                    {'name': 'IE8',  'src': 'Active3', 'dst': 'Active3'},
+                    {'name': 'IE9',  'src': 'Active1', 'dst': 'Active0'},
+                    {'name': 'IE10', 'src': 'Active3', 'dst': 'Active2'},
+                    {'name': 'IE11', 'src': 'Active0', 'dst': 'Active1'},
+                    {'name': 'IE12', 'src': 'Active2', 'dst': 'Active3'},
+                    {'name': 'IE13', 'src': 'Active3', 'dst': 'Passive'},
+                    {'name': 'IE14', 'src': 'Active0', 'dst': 'Passive'},
+                    {'name': 'IE15', 'src': 'Active1', 'dst': 'Passive'},
+                    {'name': 'IE16', 'src': 'Active2', 'dst': 'Passive'},
                   ]
 
     def __init__(self):
@@ -70,19 +61,17 @@ class DualFsm(object):
                       'onActive2': self._enter_active2,
                       'onActive3': self._enter_active3,
                     }
-        # XXX Do I need 5 state objects in each FSM (i.e. for each route)
-        # or can I have 5 shared state objects that all fsms use?
-        self._states = { 'passive': StatePassive(),
-                         'active0': StateActive0(),
-                         'active1': StateActive1(),
-                         'active2': StateActive2(),
-                         'active3': StateActive3(),
+        self._states = { 'passive': _state_passive,
+                         'active0': _state_active0,
+                         'active1': _state_active1,
+                         'active2': _state_active2,
+                         'active3': _state_active3,
                        }
         self._state = self._states['passive']
-        self._fsm = Fysom({'initial' : 'Passive',
-                           'events'  : self.DUAL_EVENTS
-                          })
-                          
+        self.fsm = Fysom({'initial' : 'Passive',
+                          'events'  : self.DUAL_EVENTS
+                         })
+
     def _enter_passive(self, e):
         self._state = self._states['passive']
 
@@ -98,8 +87,11 @@ class DualFsm(object):
     def _enter_active3(self, e):
         self._state = self._states['active3']
 
-    def handle_update(self, update):
-        self._state.handle_update(update)
+    def handle_update(self, neighbor, nexthop, metric, t_entry):
+        return self._state.handle_update(neighbor,
+                                         nexthop,
+                                         metric,
+                                         t_entry)
 
     def handle_reply(self, reply):
         self._state.handle_reply(reply)
@@ -119,8 +111,13 @@ class DualState(object):
 
 
 class StatePassive(DualState):
-    def handle_update(self, update):
+    def handle_update(self, neighbor, nexthop, metric, t_entry):
+        # XXX nexthop is unused here. Do we need to pass it in?
+        # (What about for other states that handle updates?)
+
         # IE2 and IE4, for update pkts.
+        #
+        # Pseudo code:
         #
         # If the update came from the successor:
         #    If the metric is the same as the installed metric:
@@ -146,7 +143,54 @@ class StatePassive(DualState):
         # Else:
         #    # Update came from non-neighbor
         #    Change the neighbor's metric information
-        pass
+
+        actions = list()
+        successor_entry = t_entry.get_successor()
+        if successor_entry.neighbor == neighbor:
+            # QRY came from current successor
+            if successor_entry.reported_distance == metric:
+                # If metric hasn't changed, do nothing
+                return actions
+            else:
+                # Came from successor and metric is different
+                if metric == EIGRP_INACCESSIBLE:
+                    # Unreachable via successor. Use feasible successor if
+                    # available.
+                    fs = t_entry.get_feasible_successor()
+                    if fs:
+                        # Install FS and send update with new metric.
+                        actions.append((INSTALL_SUCCESSOR, fs))
+                        t_entry.set_successor(fs)
+                        actions.append((SEND_UPDATE, metric))
+                    else:
+                        # No known route to dest. IE4, go to Active.
+                        t_entry.fsm.fsm.IE4()
+
+                        # Send QRY to all neighbors for this prefix.
+                        actions.append((SEND_QUERY, EIGRP_INACCESSIBLE))
+
+                        # Stop using route for routing.
+                        actions.append((STOP_USING_ROUTE, None))
+
+                        # XXX Set reply status flag to 1. Where do we want
+                        # to do this?
+                else:
+                    # Successor is still reachable but metric changed.
+                    # XXX
+                    # Update the metric for this neighbor in topology entry
+                    # and routing table.
+                    # Send an update packet with the new metric.
+                    pass
+        else:
+            # Update came from non-successor.
+            # XXX
+            # - If sending neighbor was not already associated with this
+            #   prefix, add him to the topology entry.
+            # - Set neighbor's TopologyNeighborInfo.metric to the metric
+            #   contained in this update packet.
+            pass
+
+        return actions
 
     def handle_reply(self, reply):
         pass
@@ -202,13 +246,19 @@ class BaseActive(DualState):
         all replies and thus should transition back to passive. This function
         should handle responding to the old successor if necessary then
         sending the correct input event to transition back to passive."""
-        assert(False)
+        assert False
 
-    def handle_update(self, update):
+    def handle_update(self, neighbor, nexthop, metric, t_entry):
+        # XXX Nexthop unused. Do we need to pass it in?
         # If update indicates a metric change:
         #     IE7. Record the metric information.
         # Endif
-        pass
+        if t_entry.get_neighbor(neighbor).reported_distance != metric:
+            t_entry.fsm.fsm.IE7()
+            t_entry.get_neighbor(neighbor).reported_distance = metric
+        else:
+            actions = list((NO_OP, None))
+        return actions
 
     def handle_reply(self, reply):
         # IE8 for REPLYs. Clear REPLY flag for this neighbor.
@@ -349,3 +399,10 @@ class StateActive3(BaseActive):
         #    IE13. Transition to Passive state
         # Endif
         pass
+
+# FSM states. Shared by all DualFsm objects.
+_state_passive = StatePassive()
+_state_active0 = StateActive0()
+_state_active1 = StateActive1()
+_state_active2 = StateActive2()
+_state_active3 = StateActive3()
