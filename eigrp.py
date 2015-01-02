@@ -28,10 +28,11 @@ import functools
 import ipaddr
 from twisted.python import log
 
+import dualfsm
 import rtp
 import rtptlv
 import util
-import dualfsm
+import sysiface
 from tw_baseiptransport import reactor
 
 class TopologyTable(object):
@@ -224,11 +225,8 @@ class EIGRP(rtp.ReliableTransportProtocol):
                                (6,  "DEBUG5"),
                              ]:
             util.create_new_log_level(level, name)
-
         logging.config.fileConfig(log_config, disable_existing_loggers=True)
         self.log = logging.getLogger("EIGRP")
-        suppress_reactor_not_running = functools.partial(util.suppress_reactor_not_running, logfunc=self.log.debug)
-        log.addObserver(suppress_reactor_not_running)
 
     def _write(self, msg, dst, src=None):
         self.log.debug5("Writing packet to %s, iface %s." % (dst, \
@@ -365,12 +363,10 @@ class EIGRP(rtp.ReliableTransportProtocol):
         self._sys.cleanup()
 
     def startProtocol(self):
-        # XXX Shouldn't use RTP's _multicast_ip variable. Get it to register
-        # for us, or make _multicast_ip non-private.
-        for iface in self._sys.logical_ifaces:
+        for iface in self._ifaces:
             if iface.activated:
                 self.transport.joinGroup(self._multicast_ip,
-                                         iface.ip.ip.exploded)
+                                         iface.logical_iface.ip.ip.exploded)
 
     def stopProtocol(self):
         self.log.info("EIGRP is shutting down.")
@@ -451,6 +447,15 @@ def parse_args(argv):
         op.error("Unexpected non-option argument(s): '" + \
                  " ".join(arguments[1:]) + "'")
 
+    # The requested iface argument expects IP addresses ("logical" interfaces),
+    # not interface names like "eth0". Throw error if invalid IP address is
+    # used. XXX Will need to be updated for IPv6.
+    for iface in options.interface:
+        try:
+            ipaddr.IPv4Address(iface)
+        except ipaddr.AddressValueError:
+            op.error("-i argument requires an interface IP address argument")
+
     return options, arguments
 
 def main(argv):
@@ -463,15 +468,18 @@ def main(argv):
         return 1
 
     options, arguments = parse_args(argv)
-    eigrpserv = EIGRP(options.router_id,
-                      options.as_number,
-                      options.route,
-                      options.import_routes,
-                      options.interface,
-                      options.log_config,
-                      options.admin_port,
-                      options.kvalues,
-                      options.hello_interval)
+    system = sysiface.SystemFactory().build()
+    eigrpserv = EIGRP(requested_ifaces=options.interface,
+                      routes=options.route,
+                      import_routes=options.import_routes,
+                      port=options.admin_port,
+                      kvalues=options.kvalues,
+                      hello_interval=options.hello_interval,
+                      system=system,
+                      logconfig=options.log_config,
+                      rid=options.router_id,
+                      asn=options.as_number,
+                     )
     eigrpserv.run()
 
 if __name__ == "__main__":

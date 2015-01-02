@@ -187,7 +187,7 @@ class LinuxSystem(_System):
             the current platform).
         priority -- the desirability of routes learned by the process
             relative to other routing daemons (if applicable on the current
-            platform"""
+            platform)"""
         super(_System, self).__thisclass__.__init__(self, *args, **kwargs)
 
         if not 0 < table < 255:
