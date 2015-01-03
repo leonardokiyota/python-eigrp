@@ -131,6 +131,8 @@ class ValueClassicMetric(ValueBase):
     # EIGRP Metric Coefficients.
     METRIC_SCALE = 256
 
+    METRIC_UNREACHABLE = 0xFFFFFFFF
+
     def __init__(self, *args, **kwargs):
         self._mtulow = 0
         self._mtuhigh = 0
@@ -209,6 +211,12 @@ class ValueClassicMetric(ValueBase):
             reliability_multiplier = 1
 
         return metric * reliability_multiplier
+
+    def reachable(self):
+        """Determines if the route is reachable.
+        If the delay field is set to the maximum value, the route is
+        considered unreachable."""
+        return self.dly != self.METRIC_UNREACHABLE
 
 
 class ValueClassicDest(ValueBase):

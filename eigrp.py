@@ -247,12 +247,28 @@ class EIGRP(rtp.ReliableTransportProtocol):
 
     def _eigrp_op_handler_update(self, neighbor, hdr, tlvs):
         self.log.debug("Processing UPDATE")
+        qry_tlvs = list()
         for tlv in tlvs:
             if tlv.type == rtptlv.TLVInternal4.TYPE:
-                self._op_update_handler_tlvinternal4(neighbor, hdr, tlv)
+                qry_tlv = self._op_update_handler_tlvinternal4(neighbor,
+                                                               hdr,
+                                                               tlv)
+                if qry_tlv:
+                    qry_tlvs.append(qry_tlv)
             else:
                 self.log.debug("Unexpected TLV type in UPDATE: {}".format(tlv))
                 return
+
+        # Send a query if necessary.
+        if qry_tlvs:
+            self._query_all_ifaces(tlvs)
+
+    def _query_all_ifaces(self, tlvs):
+        for iface in self._ifaces:
+            if iface.activated:
+                iface.send(opcode=rtp.OPC_QUERY,
+                           tlvs=tlvs,
+                           ack=True)
 
     def _op_update_handler_tlvinternal4(self, neighbor, hdr, tlv):
         """Handle an IPv4 Internal TLV within an UPDATE packet."""
@@ -263,12 +279,13 @@ class EIGRP(rtp.ReliableTransportProtocol):
             t_entry = self._topology[prefix]
         except KeyError:
             # New prefix.
-            # XXX
-            # If prefix is "reachable" according to the metric:
-            # 1. Send UPDATE packet out of all active ifaces with this route
-            # 2. Use prefix for routing
             self._topology[prefix] = TopologyEntry(prefix=prefix)
-            return
+            if not tlv.reachable():
+                return
+
+            # Send UPDATE packet out of all active ifaces with this route.
+            # Use prefix for routing.
+            pass
 
         # Prefix is already in topology table. Pass to FSM.
         # XXX TODO for PDM architecture: assumes IPv4.
@@ -282,14 +299,28 @@ class EIGRP(rtp.ReliableTransportProtocol):
                                                        nexthop,
                                                        tlv.metric,
                                                        t_entry)
-        query_prefixes = list()
         for action, data in actions:
             if action == dualfsm.NO_OP:
                 continue
             elif action == dualfsm.INSTALL_SUCCESSOR:
                 # Install route in routing table.
                 successor = data
-                total_metric = tlv.metric + successor.neighbor.iface.metric
+                self.log.debug("Installing new successor for prefix {}: "
+                               "{}".format(prefix.exploded, successor))
+
+                # XXX I need access to the specific fields that make up the
+                # metric inside the RTPInterface class so that the tlv fields
+                # can be updated before I advertise the route in an update
+                # packet below.
+                #
+                # This means the tlv.metric.compute_metric logic should
+                # probably be moved out of tlv.metric into eigrp.py, and
+                # then eigrp will grab info from RTPInterface and TLV in order
+                # to compute the "total_metric" variable which is passed into
+                # the RIB, and it will also be able to "add up" the new metric
+                # to place into the TLV before we send an UPDATE.
+                total_metric = tlv.metric.compute_metric() + \
+                               successor.neighbor.iface.metric
                 self._sys.install_route(net=prefix.ip.exploded,
                                         preflen=prefix.prefixlen,
                                         metric=total_metric,
@@ -300,17 +331,17 @@ class EIGRP(rtp.ReliableTransportProtocol):
                 # Stop using route for routing.
                 pass
             elif action == dualfsm.SEND_QUERY:
-                # Make a list of prefixes to include in the QUERY.
-                query_prefixes.append((prefix, data))
+                # Include this TLV in a QUERY packet.
+                # Reuse this TLV instead of creating another one. Change
+                # the metric's delay field to indicate an unreachable prefix.
+                self.log.debug("Including prefix {} in QUERY "
+                               "packet".format(prefix.exploded))
+                tlv.metric.dly = tlv.metric.METRIC_UNREACHABLE
+                return tlv
             else:
                 assert False, "Unknown action returned by fsm: " \
                        "{}".format(action)
-
-        # Build and send a QUERY if requested.
-        if query_prefixes:
-            # XXX Build and send a query.
-            # Clear reply status flag on all fully formed adjacencies
-            pass
+        return
 
     def _eigrp_op_handler_request(self, neighbor, hdr, tlvs):
         self.log.debug("Processing REQUEST")

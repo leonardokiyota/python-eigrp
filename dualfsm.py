@@ -153,6 +153,7 @@ class StatePassive(DualState):
                 return actions
             else:
                 # Came from successor and metric is different
+                # 
                 if metric == EIGRP_INACCESSIBLE:
                     # Unreachable via successor. Use feasible successor if
                     # available.
