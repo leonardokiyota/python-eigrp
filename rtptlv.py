@@ -127,6 +127,10 @@ class ValueClassicMetric(ValueBase):
                     "tag", "flags" ]
     FORMAT = "IIHBBBBBB"
 
+    # Bandwidth and delay are scaled up by this number. See RFC section 5.5,
+    # EIGRP Metric Coefficients.
+    METRIC_SCALE = 256
+
     def __init__(self, *args, **kwargs):
         self._mtulow = 0
         self._mtuhigh = 0
@@ -178,6 +182,33 @@ class ValueClassicMetric(ValueBase):
         mtu = self._calc_mtu(mtuhigh, mtulow)
         return unpacked[:mtuhigh_index] + tuple([mtu]) + \
                unpacked[mtuhigh_index+2:]
+
+    def compute_metric(self, k1, k2, k3, k4, k5):
+        """Return a metric integer based on the input k values."""
+        # See RFC section 5.5.1.1, Classic Composite Formulation.
+        metric = k1 * self.bw * self.METRIC_SCALE + \
+                 k2 * self.bw / (256 - self.load) + \
+                 k3 * self.dly * self.METRIC_SCALE
+
+        # A high reliability multiplier means a worse metric will be computed.
+        if k5:
+            if not k4 and \
+               not self.rel:
+                # Avoid dividing by zero. self.rel should only be zero if a
+                # malformed packet was sent, so this isn't likely.
+                reliability_multiplier = 1
+            else:
+                reliability_multiplier = k5 / (k4 + self.rel)
+        else:
+            # If k5 was 0 we would end up multiplying metric by 0 and always
+            # result in a metric of 0.
+            reliability_multiplier = 1
+
+        # If we ended up computing 0 as the quality, use 1 instead.
+        if not reliability_multiplier:
+            reliability_multiplier = 1
+
+        return metric * reliability_multiplier
 
 
 class ValueClassicDest(ValueBase):
