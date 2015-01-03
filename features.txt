@@ -1,0 +1,29 @@
+This is the start of a list of features that are not currently implemented.
+
+RTP -
+
+Missing features in RTP:
+- Sequence number wrapping
+- Variable retransmit timer
+
+Wishlist for RTP:
+- Allow protocol to be used over UDP (this would allow user to run a
+  non-EIGRP program that uses RTP without requiring root access).
+- Allow upper layer to pass in one or more TLVs to be included in the HELLO
+  packet, and don't automatically include the parameter TLV by default.
+  Non-EIGRP upper layers don't need the param tlv.
+- Refactor TLV classes to be less complicated internally while still being as
+  easy for upper layers to use.
+
+EIGRP -
+
+Missing features in EIGRP:
+- Stuck-in-active
+- PDM architecture. Only IPv4 is supported currently. Many places in the code
+  that will be affected by this are annotated.
+- Wide metric encoding
+- Rate control (50% link utilization cap)
+- External routes
+
+Wishlist for EIGRP:
+- Admin telnet console similar to the one for Python-RIPv2
