@@ -273,14 +273,14 @@ class ReliableTransportProtocol(protocol.DatagramProtocol):
         msg = pkt.pack()
         self.__send(msg, neighbor.ip.exploded, self._port)
 
-    def __send_rtp_multicast(self, iface, opcode, tlvs, ack):
+    def __send_rtp_multicast(self, iface, opcode, tlvs, ack, flags=0):
         """Send an RTP packet as a multicast.
         iface -- The interface object to send from
         opcode -- The opcode number to use in the RTP header
         tlvs -- An iterable of TLVs to send
         ack -- If the packet requires an acknowledgment
         """
-        pkt = self.__make_pkt(opcode, tlvs, ack)
+        pkt = self.__make_pkt(opcode, tlvs, ack, flags)
         self.log.debug5("Sending multicast out iface {}: {}".format(iface, \
                         pkt))
         if ack:
@@ -992,7 +992,7 @@ class RTPInterface(object):
         """Remove neighbor from this interface."""
         self._neighbors.pop(neighbor.ip.exploded, None)
 
-    def send(self, opcode, tlvs, ack):
+    def send(self, opcode, tlvs, ack, flags=0):
         """Send an RTP multicast from this interface.
         opcode -- The opcode number to use in the RTP header
         tlvs -- An iterable of TLVs to send
@@ -1006,4 +1006,5 @@ class RTPInterface(object):
         self._write(iface=self,
                     opcode=opcode,
                     tlvs=tlvs,
-                    ack=ack)
+                    ack=ack,
+                    flags=flags)

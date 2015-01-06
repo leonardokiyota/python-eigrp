@@ -153,9 +153,8 @@ class StatePassive(DualState):
                 return actions
             else:
                 # Came from successor and metric is different
-                # 
-                if metric == EIGRP_INACCESSIBLE:
-                    # Unreachable via successor. Use feasible successor if
+                if not metric.reachable():
+                    # Unreachable via successor. Use a feasible successor if
                     # available.
                     fs = t_entry.get_feasible_successor()
                     if fs:

@@ -282,6 +282,23 @@ class PhysicalInterface(object):
     def __init__(self, name, flags):
         self.name = name
         self._flags = flags
+
+    # TODO Retrieve actual interface info for stubs below.
+    # Method will be different for Windows/Linux.
+    def get_bandwidth(self):
+        return 100
+
+    def get_delay(self):
+        return 10
+
+    def get_load(self):
+        return 1
+
+    def get_reliability(self):
+        return 255
+
+    def get_mtu(self):
+        return 1500
  
  
 class LogicalInterface(object):

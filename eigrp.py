@@ -41,16 +41,17 @@ class TopologyTable(object):
     def __init__(self):
         self._topology = dict()
 
-    def update_prefix(self, prefix, neighbor, reported_distance):
-        """Update information about a neighbor for the given prefix in the
-        topology table."""
-        if not type(prefix) == ipaddr.IPv4Network:
-            raise TypeError("prefixes are expected to be of type "
-                            "ipaddr.IPv4Network")
-        if not prefix in self._topology:
-            fsm = dualfsm.DualFsm()
-            self._topology[prefix] = TopologyEntry(fsm)
-        self._topology[prefix].update_neighbor(neighbor, reported_distance)
+    # XXX Doesn't seem very useful to have this.
+#    def update_prefix(self, prefix, neighbor, reported_distance):
+#        """Update information about a neighbor for the given prefix in the
+#        topology table."""
+#        if not type(prefix) == ipaddr.IPv4Network:
+#            raise TypeError("prefixes are expected to be of type "
+#                            "ipaddr.IPv4Network")
+#        if not prefix in self._topology:
+#            fsm = dualfsm.DualFsm()
+#            self._topology[prefix] = TopologyEntry(fsm)
+#        self._topology[prefix].update_neighbor(neighbor, reported_distance)
 
     def del_prefix(self, prefix, neighbor):
         pass
@@ -78,6 +79,9 @@ class TopologyEntry(object):
         print(neighbor_info.reply_flag)
     """
 
+    NO_SUCCESSOR   = 1
+    SELF_SUCCESSOR = 2  # Local router is the successor
+
     def __init__(self, prefix):
         """prefix -- this network's network address and mask. This is
         just for informational/debugging purposes; it not used to identify the
@@ -87,10 +91,19 @@ class TopologyEntry(object):
         self.prefix = prefix
         self.fsm = dualfsm.DualFsm()
         self._neighbors = dict()
+        self.successor = NO_SUCCESSOR
 
-        # XXX Need to distinguish between lack of a successor and "self"
-        # being the current successor. Elsewhere we use None to mean "self".
-        self._successor = None
+    def add_neighbor(self, neighbor_info):
+        """Add a neighbor to the topology entry.
+        neighbor_info -- a TopologyNeighborInfo instance"""
+        if neighbor_info.neighbor in self._neighbors:
+            raise(ValueError("Neighbor already exists."))
+        self._neighbors[neighbor_info.neighbor] = neighbor_info
+
+    def get_neighbor(self, neighbor):
+        """Get the TopologyNeighborInfo entry for this prefix given an
+        RTPNeighbor instance."""
+        return self._neighbors[neighbor]
 
 #    def update_neighbor(self, neighbor, reported_distance):
 #        """Add a new neighbor for this prefix, or update an existing
@@ -102,21 +115,6 @@ class TopologyEntry(object):
 #                                                           reported_distance)
 #        # XXX Check if reported distance decreased etc, call into fsm as
 #        # necessary.
-
-    def get_neighbor(self, neighbor):
-        """Throws KeyError if neighbor not found.
-        Note that None designates the "local neighbor", not the absence of
-        a neighbor."""
-        return self._neighbors[neighbor]
-
-    def set_successor(self, neighbor):
-        """Assign a successor for this prefix.
-        neighbor should be a TopologyNeighborInfo instance."""
-        self._successor = neighbor
-
-    def get_successor(self):
-        """Return the successor for this prefix."""
-        return self._successor
 
     def all_replies_received(self):
         """Checks if replies from all fully-formed neighbors have been
@@ -146,8 +144,10 @@ class TopologyEntry(object):
 
 class TopologyNeighborInfo(object):
     def __init__(self, neighbor, reported_distance):
-        """neighbor - an RTPNeighbor instance (None for "locally" known routes)
-        reported_distance - the distance advertised by the neighbor
+        """neighbor -- an RTPNeighbor instance (None for locally-known routes)
+        reported_distance -- the metric advertised by the neighbor
+              (composite metric class such as rtptlv.ValueClassicMetric, not
+              an integer)
         """
         # Note that the interface on which a neighbor was observed is stored
         # within the RTPNeighbor instance.
@@ -261,31 +261,49 @@ class EIGRP(rtp.ReliableTransportProtocol):
 
         # Send a query if necessary.
         if qry_tlvs:
-            self._query_all_ifaces(tlvs)
-
-    def _query_all_ifaces(self, tlvs):
-        for iface in self._ifaces:
-            if iface.activated:
-                iface.send(opcode=rtp.OPC_QUERY,
-                           tlvs=tlvs,
-                           ack=True)
+            self._send(dests=self._get_active_ifaces(),
+                       opcode=rtp.OPC_QUERY,
+                       tlvs=qry_tlvs,
+                       ack=True)
 
     def _op_update_handler_tlvinternal4(self, neighbor, hdr, tlv):
         """Handle an IPv4 Internal TLV within an UPDATE packet."""
         # XXX hdr unused.
-        # TLVInternal4 attributes: nexthop, metric, dest
         prefix = ipaddr.IPv4Network("%s/%d" % (tlv.dest.exploded, tlv.plen))
+
+        # All zeroes means use the source address of the incoming packet.
+        if tlv.nexthop.ip.exploded == "0.0.0.0":
+            nexthop = neighbor.ip.exploded
+        else:
+            nexthop = tlv.nexthop.ip.exploded
+
         try:
             t_entry = self._topology[prefix]
         except KeyError:
             # New prefix.
             self._topology[prefix] = TopologyEntry(prefix=prefix)
+            t_entry = self._topology[prefix]
+            t_entry. TopologyNeighborInfo(neighbor, tlv.metric)
+
             if not tlv.reachable():
                 return
 
-            # Send UPDATE packet out of all active ifaces with this route.
-            # Use prefix for routing.
-            pass
+            # Update the TLV with metric info from the nexthop interface, then
+            # send UPDATE an packet out of all active ifaces with this route.
+            # Use the prefix for routing.
+            tlv.metric.bw   += neighbor.iface.phy_iface.get_bandwidth()
+            tlv.metric.dly  += neighbor.iface.phy_iface.get_delay()
+            tlv.metric.load += neighbor.iface.phy_iface.get_load()
+            tlv.metric.rel  += neighbor.iface.phy_iface.get_reliability()
+            tlv.metric.hops += 1
+            if neighbor.iface.phy_iface.get_mtu() < tlv.metric.mtu:
+                tlv.metric.mtu = neighbor.iface.phy_iface.get_mtu
+
+            self._send(dests=self._get_active_ifaces(),
+                       opcode=rtp.OPC_UPDATE,
+                       tlvs=tlv,
+                       ack=True)
+            return
 
         # Prefix is already in topology table. Pass to FSM.
         # XXX TODO for PDM architecture: assumes IPv4.
@@ -295,10 +313,10 @@ class EIGRP(rtp.ReliableTransportProtocol):
         else:
             nexthop = tlv.nexthop.ip.exploded
 
-        actions = self._topology[prefix].handle_update(neighbor,
-                                                       nexthop,
-                                                       tlv.metric,
-                                                       t_entry)
+        actions = t_entry.fsm.handle_update(neighbor,
+                                            nexthop,
+                                            tlv.metric,
+                                            t_entry)
         for action, data in actions:
             if action == dualfsm.NO_OP:
                 continue
@@ -356,20 +374,18 @@ class EIGRP(rtp.ReliableTransportProtocol):
         """RTP deals with HELLOs, nothing to do here."""
         pass
 
-    def _send_update(self, neighbor, init=False):
-        """Send an update packet. Used after discovering a new neighbor."""
-        # XXX Use self.__send_rtp_unicast/multicast.
-        # Also, need to rename self.__send_rtp_unicast/multicast (in rtp.py)
-        # to be non-private, since upper layers are expected to use them.
-        #hdr = self._rtphdr(opcode=self._rtphdr.OPC_UPDATE,
-        #                   flags=self._rtphdr.FLAG_INIT,
-        #                   seq=self._seq,
-        #                   ack=0,
-        #                   rid=self._rid,
-        #                   asn=self._asn)
-        #tlvs = [] # XXX
-        #pkt = rtp.RTPPacket(hdr, tlvs)
-        #neighbor.pushmsg(pkt)
+    def _send(self, dsts, opcode, tlvs, ack, flags=0):
+        """Send a packet to one or more neighbors or interfaces.
+
+        dsts -- an iterable of RTPInterface or RTPNeighbor objects
+        tlvs -- an iterable of TLVs to include in the packet
+        init -- if True, the INIT flag will be set in the RTP header
+        """
+        for dst in dsts:
+            dst.send(opcode=opcode,
+                     tlvs=tlvs,
+                     ack=ack,
+                     flags=flags)
 
     def _eigrp_op_handler_siaquery(self, neighbor, hdr, data):
         self.log.debug("Processing SIAQUERY")
