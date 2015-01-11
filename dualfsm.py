@@ -54,7 +54,8 @@ class DualFsm(object):
                     {'name': 'IE16', 'src': 'Active2', 'dst': 'Passive'},
                   ]
 
-    def __init__(self):
+    def __init__(self, get_kvalues):
+        """get_kvalues -- a function to retrieve the current K-values"""
         callbacks = { 'onPassive': self._enter_passive,
                       'onActive0': self._enter_active0,
                       'onActive1': self._enter_active1,
@@ -71,6 +72,7 @@ class DualFsm(object):
         self.fsm = Fysom({'initial' : 'Passive',
                           'events'  : self.DUAL_EVENTS
                          })
+        self._get_kvalues = get_kvalues
 
     def _enter_passive(self, e):
         self._state = self._states['passive']
@@ -91,7 +93,8 @@ class DualFsm(object):
         return self._state.handle_update(neighbor,
                                          nexthop,
                                          metric,
-                                         t_entry)
+                                         t_entry,
+                                         get_kvalues)
 
     def handle_reply(self, reply):
         self._state.handle_reply(reply)
@@ -111,7 +114,7 @@ class DualState(object):
 
 
 class StatePassive(DualState):
-    def handle_update(self, neighbor, nexthop, metric, t_entry):
+    def handle_update(self, neighbor, nexthop, metric, t_entry, get_kvalues):
         # XXX nexthop is unused here. Do we need to pass it in?
         # (What about for other states that handle updates?)
 
@@ -144,53 +147,79 @@ class StatePassive(DualState):
         #    # Update came from non-neighbor
         #    Change the neighbor's metric information
 
-        actions = list()
-        successor_entry = t_entry.get_successor()
-        if successor_entry.neighbor == neighbor:
+        # If sending neighbor was not already associated with this
+        # prefix, add it to the topology entry.
+        try:
+            neighbor_entry = t_entry.get_neighbor(neighbor)
+        except KeyError:
+            t_entry.add_neighbor(eigrp.TopologyNeighborInfo(neighbor,
+                                                            tlv.metric,
+                                                            get_kvalues))
+            neighbor_entry = t_entry.get_neighbor(neighbor)
+        successor_entry = t_entry.successor
+
+        if successor_entry == neighbor_entry:
             # QRY came from current successor
-            if successor_entry.reported_distance == metric:
+            kvalues = get_kvalues()
+            if successor_entry.reported_distance.compute_metric(*kvalues) == \
+                                metric.compute_metric(*kvalues)
                 # If metric hasn't changed, do nothing
-                return actions
+                return list((NO_OP, None))
             else:
                 # Came from successor and metric is different
                 if not metric.reachable():
                     # Unreachable via successor. Use a feasible successor if
                     # available.
+                    # XXX TODO implement this, and be aware if it returns
+                    # neighbor or neighbor_info. Going to end up needing both
+                    # before we return: neighbor for INSTALL_SUCCESSOR and
+                    # neighbor info for set_successor
                     fs = t_entry.get_feasible_successor()
                     if fs:
                         # Install FS and send update with new metric.
-                        actions.append((INSTALL_SUCCESSOR, fs))
-                        t_entry.set_successor(fs)
-                        actions.append((SEND_UPDATE, metric))
+                        return list(INSTALL_SUCCESSOR, fs.neighbor)
                     else:
                         # No known route to dest. IE4, go to Active.
                         t_entry.fsm.fsm.IE4()
 
                         # Send QRY to all neighbors for this prefix.
-                        actions.append((SEND_QUERY, EIGRP_INACCESSIBLE))
+                        actions.append((SEND_QUERY, tlv))
 
                         # Stop using route for routing.
                         actions.append((STOP_USING_ROUTE, None))
 
-                        # XXX Set reply status flag to 1. Where do we want
-                        # to do this?
+                        # Set reply flag for all neighbors for this prefix
+                        for n_entry in t_entry.neighbors:
+                            n_entry.waiting_for_reply.append(tlv.dest.addr.exploded)
                 else:
                     # Successor is still reachable but metric changed.
-                    # XXX
                     # Update the metric for this neighbor in topology entry
                     # and routing table.
                     # Send an update packet with the new metric.
-                    pass
+                    # XXX Implement the SET_METRIC and SEND_UPDATE in caller.
+                    # Can probably make set_metric more generic to handle
+                    # updating routes in general, Then other return values
+                    # can use this as well.
+                    # SEND_UPDATE could be used above as well so sending
+                    # an update isn't implied when using INSTALL_SUCCESSOR.
+                    # Not sure if that is useful for now, depends if anything
+                    # else in the fsm installs a successor without sending
+                    # an update... which doesn't sound likely.
+                    successor_entry.reported_distance = tlv.metric
+                    successor_entry.update_full_distance()
+                    actions = list()
+                    actions.append((SET_METRIC, tlv))
+                    actions.append((SEND_UPDATE, tlv))
+                    return actions
         else:
             # Update came from non-successor.
-            # XXX
-            # - If sending neighbor was not already associated with this
-            #   prefix, add him to the topology entry.
-            # - Set neighbor's TopologyNeighborInfo.metric to the metric
-            #   contained in this update packet.
-            pass
-
-        return actions
+            # If there is no successor currently and the prefix is reachable
+            # via this neighbor, use this neighbor as the successor.
+            if successor_entry == t_entry.NO_SUCCESSOR:
+                if not metric.reachable():
+                    return list((NO_OP, None))
+                return list((INSTALL_SUCCESSOR, neighbor))
+        return list((NO_OP, None))
 
     def handle_reply(self, reply):
         pass
@@ -256,8 +285,7 @@ class BaseActive(DualState):
         if t_entry.get_neighbor(neighbor).reported_distance != metric:
             t_entry.fsm.fsm.IE7()
             t_entry.get_neighbor(neighbor).reported_distance = metric
-        else:
-            actions = list((NO_OP, None))
+        actions = list((NO_OP, None))
         return actions
 
     def handle_reply(self, reply):
@@ -399,6 +427,7 @@ class StateActive3(BaseActive):
         #    IE13. Transition to Passive state
         # Endif
         pass
+
 
 # FSM states. Shared by all DualFsm objects.
 _state_passive = StatePassive()

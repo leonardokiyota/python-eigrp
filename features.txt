@@ -27,3 +27,6 @@ Missing features in EIGRP:
 
 Wishlist for EIGRP:
 - Admin telnet console similar to the one for Python-RIPv2
+
+General wishlist:
+- Python 3 port using tulip in place of twisted

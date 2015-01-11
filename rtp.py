@@ -180,12 +180,22 @@ class ReliableTransportProtocol(protocol.DatagramProtocol):
         """Called to create the hello packet's TLVs that should be sent at
         every hello interval. This should be called at startup and whenever
         the k-values or holdtime changes."""
+        # XXX self._new_kvalues should be implemented by subclass if it
+        # wants to do something when the kvalues change. When all of the
+        # kvalue logic is moved into EIGRP this won't be needed, but for
+        # now it is.
+        self._new_kvalues()
         self.__hello_tlvs = rtptlv.TLVParam(self._k1,
                                             self._k2,
                                             self._k3,
                                             self._k4,
                                             self._k5,
                                             self.__holdtime)
+
+    def _new_kvalues(self):
+        """Override in subclass to be alerted when the kvalues change. This
+        won't be needed when the kvalue logic is moved into EIGRP."""
+        pass
 
     def __rtp_found_neighbor(self, neighbor):
         self.log.debug("Neighbor {} UP, iface {}".format(neighbor,
@@ -618,6 +628,19 @@ class RTPNeighbor(object):
         self._make_pkt = make_pkt
         self._write = sendfunc
         self.update_kvalues(kvalues)
+
+        # waiting_for_reply is a list populated/maintained by the upper layer.
+        # Intended use is to track which QUERY TLVs the neighbor has replied
+        # to.
+        # Example for EIGRP: If we QUERY for 3 networks, all three networks
+        # are added to the waiting_for_reply list for each neighbor.
+        # When a REPLY is received from the neighbor, every network that
+        # was contained in the reply is removed from the waiting_for_reply
+        # list.
+        # When EIGRP checks if all replies have been received for a network,
+        # it checks every neighbor to see if that network exists in this list.
+        # If the network exists, then EIGRP is still waiting for a reply.
+        self.waiting_for_reply = list()
 
         # Holdtime will be updated when we process the first TLV param
         self._holdtime = -1

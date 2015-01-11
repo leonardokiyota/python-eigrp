@@ -26,6 +26,7 @@ import logging
 import logging.config
 import functools
 import ipaddr
+import copy
 from twisted.python import log
 
 import dualfsm
@@ -82,28 +83,30 @@ class TopologyEntry(object):
     NO_SUCCESSOR   = 1
     SELF_SUCCESSOR = 2  # Local router is the successor
 
-    def __init__(self, prefix):
+    def __init__(self, prefix, get_kvalues):
         """prefix -- this network's network address and mask. This is
         just for informational/debugging purposes; it not used to identify the
         TopologyEntry.
         The prefix assigned to the ToplogyEntry is identified by the key used
         in the TopologyTable to access this entry."""
         self.prefix = prefix
-        self.fsm = dualfsm.DualFsm()
-        self._neighbors = dict()
-        self.successor = NO_SUCCESSOR
+        self.fsm = dualfsm.DualFsm(self._get_kvalues)
+        self.neighbors = dict()
+        self.successor = self.NO_SUCCESSOR
+        self._feasible_successors = list()
+        self._get_kvalues = get_kvalues
 
     def add_neighbor(self, neighbor_info):
         """Add a neighbor to the topology entry.
         neighbor_info -- a TopologyNeighborInfo instance"""
-        if neighbor_info.neighbor in self._neighbors:
+        if neighbor_info.neighbor in self.neighbors:
             raise(ValueError("Neighbor already exists."))
-        self._neighbors[neighbor_info.neighbor] = neighbor_info
+        self.neighbors[neighbor_info.neighbor] = neighbor_info
 
     def get_neighbor(self, neighbor):
         """Get the TopologyNeighborInfo entry for this prefix given an
         RTPNeighbor instance."""
-        return self._neighbors[neighbor]
+        return self.neighbors[neighbor]
 
 #    def update_neighbor(self, neighbor, reported_distance):
 #        """Add a new neighbor for this prefix, or update an existing
@@ -121,7 +124,7 @@ class TopologyEntry(object):
         received. We do not expect a reply from any neighbor who was not fully
         formed at the time of sending the query."""
         # See section 5.3.5 of the Feb 2013 RFC (Query packets during neighbor
-        # formation.
+        # formation).
         # Question: we don't expect a reply from any neighbor who was not
         # fully formed at the time of sending the query, or from any neighbor
         # who was not fully formed at the time of checking if all replies were
@@ -141,19 +144,55 @@ class TopologyEntry(object):
         #
         pass
 
+    def get_all_feasible_successors(self):
+        """Compute a list of all possible feasible successors based on the
+        current successor."""
+        feasible_successors = list()
+        if self.successor == self.SELF_SUCCESSOR:
+            return
+        feasible_distance = self.successor.full_distance.compute_metric(*self._get_kvalues())
+        for n_entry in self.neighbors:
+            if n_entry.metric.compute_metric(*self._get_kvalues()) < \
+               feasible_distance:
+                feasible_successors.append(n_entry)
+        return feasible_successors
+
+    def get_feasible_successor(self):
+        """Return the best feasible successor for this route if any exist,
+        otherwise return None."""
+        if not entries:
+            return None
+        return min(entries, key=self._get_min_metric)
+
+    def _get_min_metric(self, n_entry):
+        return n_entry.full_distance.compute_metric()
+
 
 class TopologyNeighborInfo(object):
-    def __init__(self, neighbor, reported_distance):
-        """neighbor -- an RTPNeighbor instance (None for locally-known routes)
+    def __init__(self, neighbor, reported_distance, get_kvalues):
+        """neighbor -- an RTPNeighbor instance or None for the local router
         reported_distance -- the metric advertised by the neighbor
               (composite metric class such as rtptlv.ValueClassicMetric, not
               an integer)
-        """
+        get_kvalues -- a function to retrieve the current K-values"""
         # Note that the interface on which a neighbor was observed is stored
         # within the RTPNeighbor instance.
         self.neighbor          = neighbor
         self.reported_distance = reported_distance
         self.reply_flag        = True
+        self.full_distance     = copy.deepcopy(reported_distance)
+        self._get_kvalues      = get_kvalues
+
+        # neighbor is None when it refers to the local router, in which
+        # case both the full distance and the reported distance are
+        # effectively 0. For anything else, the full distance is the reported
+        # distance plus the interface cost.
+        if self.neighbor:
+            self.update_full_distance()
+
+    def update_full_distance(self):
+        self.full_distance.update_for_iface(self.neighbor.iface)
+        self.full_distance.compute_metric(*get_kvalues())
 
 
 class EIGRP(rtp.ReliableTransportProtocol):
@@ -198,6 +237,18 @@ class EIGRP(rtp.ReliableTransportProtocol):
         self._init_routes(import_routes, routes)
         #eigrpadmin.run(self, port=admin_port)
 
+    def _new_kvalues(self):
+        """Clear any precomputed metrics in the topology table to force
+        the use of the new kvalues."""
+        self.log.debug("KValues changed, clearing precomputed metrics.")
+        for prefix, t_entry in self._topology:
+            for neighbor in t_entry.neighbors:
+                neighbor.reported_distance.clear_saved_metric()
+                neighbor.full_distance.clear_saved_metric()
+
+    def _get_kvalues(self):
+        return self._k1, self._k2, self._k3, self._k4, self._k5
+
     def _init_routes(self, import_routes, requested_routes):
         routes = list()
         if import_routes:
@@ -229,7 +280,7 @@ class EIGRP(rtp.ReliableTransportProtocol):
         self.log = logging.getLogger("EIGRP")
 
     def _write(self, msg, dst, src=None):
-        self.log.debug5("Writing packet to %s, iface %s." % (dst, \
+        self.log.debug5("Writing packet to {}, iface {}.".format(dst, \
                         src or "unspecified"))
         if src:
             self.transport.setOutgoingInterface(src)
@@ -247,29 +298,44 @@ class EIGRP(rtp.ReliableTransportProtocol):
 
     def _eigrp_op_handler_update(self, neighbor, hdr, tlvs):
         self.log.debug("Processing UPDATE")
-        qry_tlvs = list()
+        query_tlvs = list()
+        update_tlvs = list()
         for tlv in tlvs:
             if tlv.type == rtptlv.TLVInternal4.TYPE:
-                qry_tlv = self._op_update_handler_tlvinternal4(neighbor,
-                                                               hdr,
-                                                               tlv)
-                if qry_tlv:
-                    qry_tlvs.append(qry_tlv)
+                self._op_update_handler_tlvinternal4(neighbor,
+                                                     hdr,
+                                                     tlv,
+                                                     query_tlvs,
+                                                     update_tlvs)
             else:
                 self.log.debug("Unexpected TLV type in UPDATE: {}".format(tlv))
                 return
 
-        # Send a query if necessary.
-        if qry_tlvs:
+        # Send UPDATE and/or QUERY if necessary.
+        if update_tlvs:
             self._send(dests=self._get_active_ifaces(),
                        opcode=rtp.OPC_QUERY,
-                       tlvs=qry_tlvs,
+                       tlvs=update_tlvs,
+                       ack=True)
+        if query_tlvs:
+            self._send(dests=self._get_active_ifaces(),
+                       opcode=rtp.OPC_QUERY,
+                       tlvs=query_tlvs,
                        ack=True)
 
-    def _op_update_handler_tlvinternal4(self, neighbor, hdr, tlv):
-        """Handle an IPv4 Internal TLV within an UPDATE packet."""
+    def _op_update_handler_tlvinternal4(self, neighbor, hdr, tlv, query_tlvs,
+                                        update_tlvs):
+        """Handle an IPv4 Internal TLV within an UPDATE packet.
+        neighbor -- RTP neighbor that sent the update
+        hdr -- the RTP header
+        tlv -- the IPv4 Internal Route TLV
+        query_tlvs -- a list that this function will append TLVs to be
+                      included in a QUERY packet
+        update_tlvs -- a list that this function will append TLVs to be
+                       included in an UPDATE packet"""
         # XXX hdr unused.
-        prefix = ipaddr.IPv4Network("%s/%d" % (tlv.dest.exploded, tlv.plen))
+        prefix = ipaddr.IPv4Network("{}/{}".format(tlv.dest.exploded,
+                                                   tlv.plen))
 
         # All zeroes means use the source address of the incoming packet.
         if tlv.nexthop.ip.exploded == "0.0.0.0":
@@ -281,29 +347,9 @@ class EIGRP(rtp.ReliableTransportProtocol):
             t_entry = self._topology[prefix]
         except KeyError:
             # New prefix.
-            self._topology[prefix] = TopologyEntry(prefix=prefix)
+            self._topology[prefix] = TopologyEntry(prefix,
+                                                   self._get_kvalues)
             t_entry = self._topology[prefix]
-            t_entry. TopologyNeighborInfo(neighbor, tlv.metric)
-
-            if not tlv.reachable():
-                return
-
-            # Update the TLV with metric info from the nexthop interface, then
-            # send UPDATE an packet out of all active ifaces with this route.
-            # Use the prefix for routing.
-            tlv.metric.bw   += neighbor.iface.phy_iface.get_bandwidth()
-            tlv.metric.dly  += neighbor.iface.phy_iface.get_delay()
-            tlv.metric.load += neighbor.iface.phy_iface.get_load()
-            tlv.metric.rel  += neighbor.iface.phy_iface.get_reliability()
-            tlv.metric.hops += 1
-            if neighbor.iface.phy_iface.get_mtu() < tlv.metric.mtu:
-                tlv.metric.mtu = neighbor.iface.phy_iface.get_mtu
-
-            self._send(dests=self._get_active_ifaces(),
-                       opcode=rtp.OPC_UPDATE,
-                       tlvs=tlv,
-                       ack=True)
-            return
 
         # Prefix is already in topology table. Pass to FSM.
         # XXX TODO for PDM architecture: assumes IPv4.
@@ -321,32 +367,33 @@ class EIGRP(rtp.ReliableTransportProtocol):
             if action == dualfsm.NO_OP:
                 continue
             elif action == dualfsm.INSTALL_SUCCESSOR:
-                # Install route in routing table.
+                # Use this neighbor as the successor.
                 successor = data
                 self.log.debug("Installing new successor for prefix {}: "
                                "{}".format(prefix.exploded, successor))
-
-                # XXX I need access to the specific fields that make up the
-                # metric inside the RTPInterface class so that the tlv fields
-                # can be updated before I advertise the route in an update
-                # packet below.
-                #
-                # This means the tlv.metric.compute_metric logic should
-                # probably be moved out of tlv.metric into eigrp.py, and
-                # then eigrp will grab info from RTPInterface and TLV in order
-                # to compute the "total_metric" variable which is passed into
-                # the RIB, and it will also be able to "add up" the new metric
-                # to place into the TLV before we send an UPDATE.
-                total_metric = tlv.metric.compute_metric() + \
-                               successor.neighbor.iface.metric
-                self._sys.install_route(net=prefix.ip.exploded,
-                                        preflen=prefix.prefixlen,
+                t_entry.successor = t_entry.get_neighbor(neighbor)
+                tlv.update_for_iface(neighbor.iface)
+                total_metric = tlv.metric.compute_metric(self._k1,
+                                                         self._k2,
+                                                         self._k3,
+                                                         self._k4,
+                                                         self._k5)
+                tlv.nexthop.ip = ipaddr.IPv4Address("0.0.0.0")
+                try:
+                    # Uninstall route to old nexthop, if one existed.
+                    # XXX Should know in advance whether this is required or
+                    # not.
+                    self._sys.uninstall_route(net=prefix.network.exploded,
+                                              plen=prefix.prefixlen)
+                except ValueError:
+                    pass
+                self._sys.install_route(net=prefix.network.exploded,
+                                        plen=prefix.prefixlen,
                                         metric=total_metric,
                                         nexthop=nexthop)
-                # XXX Send update to all active ifaces with new metric
-                pass
+                update_tlvs.append(tlv)
             elif action == dualfsm.STOP_USING_ROUTE:
-                # Stop using route for routing.
+                # XXX Stop using route for routing.
                 pass
             elif action == dualfsm.SEND_QUERY:
                 # Include this TLV in a QUERY packet.
@@ -355,7 +402,7 @@ class EIGRP(rtp.ReliableTransportProtocol):
                 self.log.debug("Including prefix {} in QUERY "
                                "packet".format(prefix.exploded))
                 tlv.metric.dly = tlv.metric.METRIC_UNREACHABLE
-                return tlv
+                query_tlvs.append(tlv)
             else:
                 assert False, "Unknown action returned by fsm: " \
                        "{}".format(action)
@@ -375,11 +422,16 @@ class EIGRP(rtp.ReliableTransportProtocol):
         pass
 
     def _send(self, dsts, opcode, tlvs, ack, flags=0):
-        """Send a packet to one or more neighbors or interfaces.
+        """Send a packet to one or more neighbors or interfaces. This is the
+        function that EIGRP should use to pass data into RTP.
 
         dsts -- an iterable of RTPInterface or RTPNeighbor objects
+        opcode -- The value to place in the RTP header's opcode field. Should
+                  be one of the self._rtphdr.OPC_* values.
         tlvs -- an iterable of TLVs to include in the packet
-        init -- if True, the INIT flag will be set in the RTP header
+        ack -- if True, require an ACK for this packet
+        flags -- The value to place in the RTP header's flags field. Should be
+                 one of the self._rtphdr.FLAG_* values.
         """
         for dst in dsts:
             dst.send(opcode=opcode,
@@ -429,8 +481,8 @@ class EIGRP(rtp.ReliableTransportProtocol):
         try:
             handler = self._op_handlers[hdr.opcode]
         except KeyError:
-            self.log.info("Received invalid/unhandled opcode %d from %s" % \
-                          (hdr.opcode, neighbor))
+            self.log.info("Received invalid/unhandled opcode {} from "
+                          "{}".format(hdr.opcode, neighbor))
             return
         handler(neighbor, hdr, tlvs)
         self.log.debug("Finished handling opcode.")

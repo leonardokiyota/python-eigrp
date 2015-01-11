@@ -43,11 +43,15 @@ class _System(object):
         """Do anything related to starting routing on the system."""
         pass
 
-    def modify_route(self, rt):
-        """Update the metric and nexthop address to a prefix."""
-        self.uninstall_route(rt.network.ip.exploded, rt.network.prefixlen)
-        self.install_route(rt.network.ip.exploded, rt.network.prefixlen,
-                           rt.metric, rt.nexthop)
+    def modify_route(self, net, plen, metric, nexthop):
+        """Update the metric and nexthop address to a prefix.
+        net -- the IP network address (not including netmask)
+        plen -- the prefix length
+        metric -- the metric to use, as an integer
+        nexthop -- the nexthop IP address
+        """
+        self.uninstall_route(net, plen)
+        self.install_route(net, plen, metric, nexthop)
 
     def cleanup(self):
         """Clean up the system. Called when exiting.
@@ -286,15 +290,21 @@ class PhysicalInterface(object):
     # TODO Retrieve actual interface info for stubs below.
     # Method will be different for Windows/Linux.
     def get_bandwidth(self):
+        """Throughput expressed as picoseconds per kilobyte of data sent."""
         return 100
 
     def get_delay(self):
+        """Delay expressed in 10 microsecond units."""
         return 10
 
     def get_load(self):
+        """Load of the link based on output packets. 1 means a low load.
+        255 means a high load."""
         return 1
 
     def get_reliability(self):
+        """Link reliability expressed as a number between 1 and 255. 1 means
+        completely unreliable, 255 means completely reliable. 0 is invalid."""
         return 255
 
     def get_mtu(self):
