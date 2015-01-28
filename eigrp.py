@@ -142,7 +142,10 @@ class TopologyEntry(object):
         # that, mentioned something about being able to have multiple QRY
         # packets out at once.
         #
-        pass
+        for neighbor in self.neighbors.itervalues():
+            if self.prefix in neighbor.waiting_for_replies:
+                return False
+        return True
 
     def get_all_feasible_successors(self):
         """Compute a list of all possible feasible successors based on the
@@ -188,11 +191,20 @@ class TopologyNeighborInfo(object):
         # effectively 0. For anything else, the full distance is the reported
         # distance plus the interface cost.
         if self.neighbor:
-            self.update_full_distance()
+            self._update_full_distance()
 
-    def update_full_distance(self):
+    def _update_full_distance(self):
         self.full_distance.update_for_iface(self.neighbor.iface)
         self.full_distance.compute_metric(*get_kvalues())
+
+    @property
+    def reported_distance(self):
+        return self._reported_distance
+
+    @reported_distance.setter
+    def reported_distance(self, val):
+        self._reported_distance = val
+        self._update_full_distance()
 
 
 class EIGRP(rtp.ReliableTransportProtocol):
@@ -235,7 +247,19 @@ class EIGRP(rtp.ReliableTransportProtocol):
         for iface in requested_ifaces:
             self.activate_iface(iface)
         self._init_routes(import_routes, routes)
+        if sys.platform == "linux2":
+            self_iface_event_listener = netlink_listener.LinuxIfaceEventListener(self._link_up, self._link_down)
+        else:
+            self.log.info("Currently no iface event listener for Windows.")
         #eigrpadmin.run(self, port=admin_port)
+
+    def _link_up(self, ifname):
+        # XXX TODO
+        self.log.info("Link up: {}".format(ifname))
+
+    def _link_down(self, ifname):
+        # XXX TODO
+        self.log.info("Link down: {}".format(ifname))
 
     def _new_kvalues(self):
         """Clear any precomputed metrics in the topology table to force
@@ -289,7 +313,6 @@ class EIGRP(rtp.ReliableTransportProtocol):
     def _register_op_handlers(self):
         self._op_handlers = dict()
         self._op_handlers[self._rtphdr.OPC_UPDATE] = self._eigrp_op_handler_update
-        self._op_handlers[self._rtphdr.OPC_REQUEST] = self._eigrp_op_handler_request
         self._op_handlers[self._rtphdr.OPC_QUERY] = self._eigrp_op_handler_query
         self._op_handlers[self._rtphdr.OPC_REPLY] = self._eigrp_op_handler_reply
         self._op_handlers[self._rtphdr.OPC_HELLO] = self._eigrp_op_handler_hello
@@ -308,13 +331,13 @@ class EIGRP(rtp.ReliableTransportProtocol):
                                                      query_tlvs,
                                                      update_tlvs)
             else:
-                self.log.debug("Unexpected TLV type in UPDATE: {}".format(tlv))
+                self.log.debug("Unexpected TLV type: {}".format(tlv))
                 return
 
         # Send UPDATE and/or QUERY if necessary.
         if update_tlvs:
             self._send(dests=self._get_active_ifaces(),
-                       opcode=rtp.OPC_QUERY,
+                       opcode=rtp.OPC_UPDATE,
                        tlvs=update_tlvs,
                        ack=True)
         if query_tlvs:
@@ -408,14 +431,121 @@ class EIGRP(rtp.ReliableTransportProtocol):
                        "{}".format(action)
         return
 
-    def _eigrp_op_handler_request(self, neighbor, hdr, tlvs):
-        self.log.debug("Processing REQUEST")
-
     def _eigrp_op_handler_query(self, neighbor, hdr, tlvs):
         self.log.debug("Processing QUERY")
+        query_tlvs = list()
+        for tlv in tlvs:
+            if tlv.type == rtptlv.TLVInternal4.TYPE:
+                self._op_query_handler_tlvinternal4(neighbor,
+                                                    hdr,
+                                                    tlv,
+                                                    query_tlvs)
+            else:
+                self.log.debug("Unexpected TLV type: {}".format(tlv))
+                return
+
+        # Send QUERY if necessary.
+        if query_tlvs:
+            self._send(dests=self._get_active_ifaces(),
+                       opcode=rtp.OPC_QUERY,
+                       tlvs=query_tlvs,
+                       ack=True)
+
+    def _op_query_handler_tlvinternal4(self, neighbor, hdr, tlv, query_tlvs):
+        """Handle an IPv4 Internal TLV within a QUERY packet.
+        neighbor -- RTP neighbor that sent the update
+        hdr -- the RTP header
+        tlv -- the IPv4 Internal Route TLV
+        query_tlvs -- a list that this function will append TLVs to be
+                      included in a QUERY packet"""
+        # XXX hdr unused.
+        # Other verbiage from the RFC:
+        # A REPLY packet will be sent in response to a QUERY or SIA-QUERY
+        # packet, if the router believes it has an alternate feasible
+        # successor. The REPLY packet will include a TLV for each destination
+        # and the associated vectorized metric in its own topology table.
+        prefix = ipaddr.IPv4Network("{}/{}".format(tlv.dest.exploded,
+                                                   tlv.plen))
+
+        try:
+            t_entry = self._topology[prefix]
+        except KeyError:
+            # New prefix. From RFC rev 3:
+            # When a query is received for a route that doesn't
+            # exist in our topology table, a reply with infinite metric is
+            # sent and an entry in the topology table is added with the metric
+            # in the QUERY if the metric is not an infinite value.
+            # TODO: Have fsm send a reply w/ INF metric and add entry in
+            # topology table if tlv.metric is not INF.
+            self._topology[prefix] = TopologyEntry(prefix,
+                                                   self._get_kvalues)
+            t_entry = self._topology[prefix]
+
+        actions = t_entry.handle_query(neighbor, nexthop, t_entry)
+
+        for action, data in actions:
+            if action == dualfsm.NO_OP:
+                continue
+            elif action == dualfsm.INSTALL_SUCCESSOR:
+                # XXX Try to be able to do the same thing that the other
+                # TLV handling functions do so we can move this logic into
+                # a shared function.
+                pass
+            elif action == dualfsm.SEND_QUERY:
+                pass
+            elif action == dualfsm.SEND_REPLY:
+                pass
+            else:
+                assert False, "Unknown action returned by fsm: " \
+                       "{}".format(action)
 
     def _eigrp_op_handler_reply(self, neighbor, hdr, tlvs):
         self.log.debug("Processing REPLY")
+        query_tlvs = list()
+        for tlv in tlvs:
+            if tlv.type == rtptlv.TLVInternal4.TYPE:
+                self._op_reply_handler_tlvinternal4(neighbor,
+                                                    hdr,
+                                                    tlv)
+            else:
+                self.log.debug("Unexpected TLV type: {}".format(tlv))
+                return
+
+    def _op_reply_handler_tlvinternal4(self, neighbor, hdr, tlv):
+        """Handle an IPv4 Internal TLV within a QUERY packet.
+        neighbor -- RTP neighbor that sent the update
+        hdr -- the RTP header
+        tlv -- the IPv4 Internal Route TLV"""
+        # XXX hdr unused.
+        prefix = ipaddr.IPv4Network("{}/{}".format(tlv.dest.exploded,
+                                                   tlv.plen))
+        try:
+            t_entry = self._topology[prefix]
+        except KeyError:
+            # XXX
+            # New prefix, shouldn't normally happen... but what do
+            # we do if it does?  Let's just ignore it.
+            self.log.warn("Ignoring TLV in REPLY that contains unknown "
+                          "prefix: {},".format(prefix))
+            return
+
+        actions = t_entry.handle_reply(neighbor, nexthop, t_entry)
+
+        for action, data in actions:
+            if action == dualfsm.NO_OP:
+                continue
+            elif action == dualfsm.INSTALL_SUCCESSOR:
+                # XXX Try to be able to do the same thing that the other
+                # TLV handling functions do so we can move this logic into
+                # a shared function.
+                pass
+            elif action == dualfsm.SEND_QUERY:
+                pass
+            elif action == dualfsm.SEND_REPLY:
+                pass
+            else:
+                assert False, "Unknown action returned by fsm: " \
+                       "{}".format(action)
 
     def _eigrp_op_handler_hello(self, neighbor, hdr, tlvs):
         """RTP deals with HELLOs, nothing to do here."""

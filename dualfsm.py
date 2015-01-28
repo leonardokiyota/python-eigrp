@@ -20,10 +20,6 @@ INSTALL_SUCCESSOR = 6
 SET_METRIC        = 7
 NO_OP             = 8
 
-# Other constants
-# Metric EIGRP uses to indicate inaccessible routes.
-EIGRP_INACCESSIBLE = 0xFFFFFFFFFFFFFFFF
-
 class DualFsm(object):
 
     # Input events. See section 3.5, Dual FSM, in the RFC.
@@ -89,18 +85,24 @@ class DualFsm(object):
     def _enter_active3(self, e):
         self._state = self._states['active3']
 
-    def handle_update(self, neighbor, nexthop, metric, t_entry):
+    def handle_update(self, neighbor, nexthop, metric, t_entry, get_kvalues):
         return self._state.handle_update(neighbor,
                                          nexthop,
                                          metric,
                                          t_entry,
                                          get_kvalues)
 
-    def handle_reply(self, reply):
-        self._state.handle_reply(reply)
+    def handle_reply(self, neighbor, nexthop, t_entry):
+        self._state.handle_reply(neighbor,
+                                 nexthop,
+                                 t_entry)
 
-    def handle_query(self, query):
-        self._state.handle_query(query)
+    def handle_query(self, neighbor, nexthop, metric, t_entry, get_kvalues):
+        self._state.handle_query(neighbor,
+                                 nexthop,
+                                 metric,
+                                 t_entry,
+                                 get_kvalues)
 
     def handle_link_down(self, linkmsg):
         self._state.handle_link_down(linkmsg)
@@ -221,15 +223,18 @@ class StatePassive(DualState):
                 return list((INSTALL_SUCCESSOR, neighbor))
         return list((NO_OP, None))
 
-    def handle_reply(self, reply):
-        pass
+    def handle_reply(self, neighbor, nexthop, t_entry):
+        # We shouldn't normally receive a REPLY in Passive state, and there
+        # is no reason we would need to parse it here. Just ignore it.
+        return list((NO_OP, None))
 
-    def handle_query(self, neighbor, query):
+    def handle_query(self, neighbor, nexthop, metric, t_entry, get_kvalues):
         # IE1 and IE3
         #
         # If query came from successor:
         #    If we have a feasible successor:
-        #        # XXX Install route and go into passive? Send update?
+        #        # XXX I think we send a reply to successor w/ our route info,
+        #        # but try to check in the RFC or Doyle on that.
         #    Else:
         #        # IE3, no feasible successor
         #        Transition to Active3 state
@@ -277,7 +282,7 @@ class BaseActive(DualState):
         sending the correct input event to transition back to passive."""
         assert False
 
-    def handle_update(self, neighbor, nexthop, metric, t_entry):
+    def handle_update(self, neighbor, nexthop, metric, t_entry, get_kvalues):
         # XXX Nexthop unused. Do we need to pass it in?
         # If update indicates a metric change:
         #     IE7. Record the metric information.
@@ -285,17 +290,32 @@ class BaseActive(DualState):
         if t_entry.get_neighbor(neighbor).reported_distance != metric:
             t_entry.fsm.fsm.IE7()
             t_entry.get_neighbor(neighbor).reported_distance = metric
-        actions = list((NO_OP, None))
-        return actions
+        return list((NO_OP, None))
 
-    def handle_reply(self, reply):
+    def handle_reply(self, neighbor, nexthop, t_entry):
         # IE8 for REPLYs. Clear REPLY flag for this neighbor.
         # If all neighbors have replied:
         #    IE13/14/15/16. Call self._received_last_reply
         # Endif
-        pass
 
-    def handle_query(self, query, neighbor):
+        # TODO: What about the part where we determine if we learned of a new
+        # FS? I don't actually see this detailed in the RFC (rev 1). Maybe
+        # it's in a newer rev.
+        #
+        # Should be able to base our processing here off of the QUERY handling
+        # code. We know what to expect here based on what gets filled in during
+        # query processing.
+        # We need to record the reply info somewhere, presumably the topology
+        # entry, while we wait for all replies.
+        # Presumably we check if the tlv's metric is reachable or not and
+        # either add a new successor here or don't.
+        t_entry.fsm.fsm.IE8()
+        neighbor.waiting_for_reply.remove(t_entry.prefix)
+        if t_entry.all_replies_received():
+            self._received_last_reply()
+        return list((self.NO_OP, None))
+
+    def handle_query(self, neighbor, nexthop, metric, t_entry, get_kvalues):
         # If sender is the successor:
         #     # XXX This can happen in Active0 or Active1 (it's IE5). Should
         #     # pass in another handler function like _received_last_reply
