@@ -208,17 +208,17 @@ class TopologyNeighborInfo(object):
 
 
 class EIGRP(rtp.ReliableTransportProtocol):
+    """An EIGRP implementation based on Cisco's draft informational RFC
+    located here:
+ 
+    http://www.ietf.org/id/draft-savage-eigrp-01.txt"""
 
     DEFAULT_KVALUES = [ 1, 0, 1, 0, 0 ]
     MC_IP = "224.0.0.10"
 
     def __init__(self, requested_ifaces, routes=None, import_routes=False,
                  admin_port=None, *args, **kwargs):
-        """An EIGRP implementation based on Cisco's draft informational RFC
-        located here:
-
-        http://www.ietf.org/id/draft-savage-eigrp-01.txt
-
+        """
         requested_ifaces -- Iterable of IP addresses to send from
         routes -- Iterable of routes to import
         import_routes -- Import routes from the kernel (True or False)

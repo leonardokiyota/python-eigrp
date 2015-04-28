@@ -11,14 +11,12 @@ from fysom import Fysom
 # Each requested action will be a dict of the form: {action: '...', data: '...'}
 # The data key will contain action-dependent data. For example, if the action
 # requires that a metric be updated, the data will contain the new metric.
-SEND_UPDATE       = 1
-SEND_REPLY        = 2
-SEND_QUERY        = 3
-MODIFY_REPLY_FLAG = 4
-STOP_USING_ROUTE  = 5
-INSTALL_SUCCESSOR = 6
-SET_METRIC        = 7
-NO_OP             = 8
+NO_OP                  = 1
+INSTALL_SUCCESSOR      = 2
+UNINSTALL_SUCCESSOR    = 3
+MODIFY_SUCCESSOR_ROUTE = 4
+SEND_QUERY             = 5
+SEND_REPLY             = 6
 
 class DualFsm(object):
 
