@@ -27,6 +27,7 @@ import logging.config
 import functools
 import ipaddr
 import copy
+import netlink_listener
 from twisted.python import log
 
 import dualfsm
@@ -35,31 +36,6 @@ import rtptlv
 import util
 import sysiface
 from tw_baseiptransport import reactor
-
-class TopologyTable(object):
-    """A container for TopologyEntry instances."""
-
-    def __init__(self):
-        self._topology = dict()
-
-    # XXX Doesn't seem very useful to have this.
-#    def update_prefix(self, prefix, neighbor, reported_distance):
-#        """Update information about a neighbor for the given prefix in the
-#        topology table."""
-#        if not type(prefix) == ipaddr.IPv4Network:
-#            raise TypeError("prefixes are expected to be of type "
-#                            "ipaddr.IPv4Network")
-#        if not prefix in self._topology:
-#            fsm = dualfsm.DualFsm()
-#            self._topology[prefix] = TopologyEntry(fsm)
-#        self._topology[prefix].update_neighbor(neighbor, reported_distance)
-
-    def del_prefix(self, prefix, neighbor):
-        pass
-
-    def get_prefix(self, prefix):
-        pass
-
 
 class TopologyEntry(object):
     """A topology entry contains the FSM object used for a given prefix,
@@ -226,6 +202,7 @@ class EIGRP(rtp.ReliableTransportProtocol):
         admin_port -- The TCP port to bind to the administrative interface
                       (not implemented)
         """
+        self._topology = dict()
         rtp.ReliableTransportProtocol.__init__(self, *args, **kwargs)
         # XXX Should probably move all kvalue stuff out of RTP and into EIGRP
         # then allow a way to add arbitrary data to RTP's HELLO messages
@@ -242,7 +219,6 @@ class EIGRP(rtp.ReliableTransportProtocol):
             self._k4 = self.DEFAULT_KVALUES[3]
             self._k5 = self.DEFAULT_KVALUES[4]
 
-        self._topology = TopologyTable()
         self._register_op_handlers()
         for iface in requested_ifaces:
             self.activate_iface(iface)
@@ -265,7 +241,7 @@ class EIGRP(rtp.ReliableTransportProtocol):
         """Clear any precomputed metrics in the topology table to force
         the use of the new kvalues."""
         self.log.debug("KValues changed, clearing precomputed metrics.")
-        for prefix, t_entry in self._topology:
+        for prefix, t_entry in self._topology.iteritems():
             for neighbor in t_entry.neighbors:
                 neighbor.reported_distance.clear_saved_metric()
                 neighbor.full_distance.clear_saved_metric()
@@ -415,7 +391,7 @@ class EIGRP(rtp.ReliableTransportProtocol):
                                         metric=total_metric,
                                         nexthop=nexthop)
                 update_tlvs.append(tlv)
-            elif action == dualfsm.STOP_USING_ROUTE:
+            elif action == dualfsm.UNINSTALL_SUCCESSOR:
                 # XXX Stop using route for routing.
                 pass
             elif action == dualfsm.SEND_QUERY:

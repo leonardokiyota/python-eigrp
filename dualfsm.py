@@ -162,7 +162,7 @@ class StatePassive(DualState):
             # QRY came from current successor
             kvalues = get_kvalues()
             if successor_entry.reported_distance.compute_metric(*kvalues) == \
-                                metric.compute_metric(*kvalues)
+                                metric.compute_metric(*kvalues):
                 # If metric hasn't changed, do nothing
                 return list((NO_OP, None))
             else:
@@ -183,10 +183,11 @@ class StatePassive(DualState):
                         t_entry.fsm.fsm.IE4()
 
                         # Send QRY to all neighbors for this prefix.
+                        actions = list()
                         actions.append((SEND_QUERY, tlv))
 
                         # Stop using route for routing.
-                        actions.append((STOP_USING_ROUTE, None))
+                        actions.append((UNINSTALL_SUCCESSOR, None))
 
                         # Set reply flag for all neighbors for this prefix
                         for n_entry in t_entry.neighbors:
@@ -243,7 +244,40 @@ class StatePassive(DualState):
         #    # Query did not come from successor
         #    # IE1
         #    Send reply to src with our route info
-        pass
+        try:
+            neighbor_entry = t_entry.get_neighbor(neighbor)
+        except KeyError:
+            # XXX Can this happen?
+            self.log.info("Ignoring query from unknown neighbor at {}".format(neighbor))
+            return list((NO_OP, None))
+
+        if t_entry.successor == neighbor_entry:
+            fs = t_entry.get_feasible_successor()
+            if fs:
+                # XXX What should the actions list look like for this?
+                # Just pass up the FS I think - we already know the tlv
+                # in the caller, so we can fill out the reply correctly I
+                # think.
+                return list((SEND_REPLY, fs))
+            else:
+                t_entry.fsm.fsm.IE3()
+                actions = list()
+                actions.append((SEND_QUERY, tlv))
+
+                # Stop using route for routing.
+                actions.append((UNINSTALL_SUCCESSOR, None))
+
+                # Set reply flag for all neighbors for this prefix
+                for n_entry in t_entry.neighbors:
+                    n_entry.waiting_for_reply.append(tlv.dest.addr.exploded)
+        else:
+            # Query did not come from successor, reply with our route info
+            # XXX What should the actions list look like for this?
+            # Just pass up the successor I think - we already know the tlv
+            # in the caller, so we can fill out the reply correctly I
+            # think.
+            t_entry.fsm.fsm.IE1()
+            return list((SEND_REPLY, successor))
 
     def handle_link_down(self, linkmsg):
         # IE2 and IE4 for link down changes. Snipped from handle_update,
