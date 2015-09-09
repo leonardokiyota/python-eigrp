@@ -244,14 +244,7 @@ class StatePassive(DualState):
         #    # Query did not come from successor
         #    # IE1
         #    Send reply to src with our route info
-        try:
-            neighbor_entry = t_entry.get_neighbor(neighbor)
-        except KeyError:
-            # XXX Can this happen?
-            self.log.info("Ignoring query from unknown neighbor at {}".format(neighbor))
-            return list((NO_OP, None))
-
-        if t_entry.successor == neighbor_entry:
+        if t_entry.successor == neighbor:
             fs = t_entry.get_feasible_successor()
             if fs:
                 # XXX What should the actions list look like for this?
@@ -314,6 +307,12 @@ class BaseActive(DualState):
         sending the correct input event to transition back to passive."""
         assert False
 
+    def _handle_query_from_successor(self, neighbor, nexthop, metric, t_entry, get_kvalues):
+        """Must override in subclass.
+        This function is called when we have received a query about a network
+        from a neighbor which is our current successor for that network."""
+        assert False
+
     def handle_update(self, neighbor, nexthop, metric, t_entry, get_kvalues):
         # XXX Nexthop unused. Do we need to pass it in?
         # If update indicates a metric change:
@@ -358,7 +357,12 @@ class BaseActive(DualState):
         #     # Sender is not the successor
         #     IE6. Send a REPLY. # Record the cost that I send... where and why?
         # Endif
-        pass
+        if neighbor == t_entry.successor:
+            # XXX What args do I need?
+            return self._handle_query_from_successor(neighbor, nexthop, metric, t_entry, get_kvalues)
+        else:
+            t_entry.fsm.fsm.IE6()
+            return list((SEND_REPLY, successor))
 
     def handle_link_metric_change(self, linkmsg):
         pass
@@ -375,6 +379,14 @@ class StateActive0(BaseActive):
         #     Send reply to old successor.
         # Endif
         # IE14. Transition to passive.
+        pass
+
+    def _handle_query_from_successor(neighbor, nexthop, metric, t_entry, get_kvalues):
+        #     # XXX This can happen in Active0 or Active1 (it's IE5). Should
+        #     # pass in another handler function like _received_last_reply
+        #     # that other states can use to act here. Active2 and 3 should
+        #     # log/ignore it, Active0 and 1 should call IE5 (and also do
+        #     # something?).
         pass
 
     def handle_link_down(self, linkmsg):
@@ -418,6 +430,14 @@ class StateActive1(BaseActive):
         # IE15. Transition to passive.
         pass
 
+    def _handle_query_from_successor(neighbor, nexthop, metric, t_entry, get_kvalues):
+        #     # XXX This can happen in Active0 or Active1 (it's IE5). Should
+        #     # pass in another handler function like _received_last_reply
+        #     # that other states can use to act here. Active2 and 3 should
+        #     # log/ignore it, Active0 and 1 should call IE5 (and also do
+        #     # something?).
+        pass
+
     def handle_link_down(self, linkmsg):
         # The relevant link has already failed in Active3 or Passive in order
         # to get to Active2, so it can't fail again.
@@ -438,6 +458,14 @@ class StateActive2(BaseActive):
         # Endif
         pass
 
+    def _handle_query_from_successor(neighbor, nexthop, metric, t_entry, get_kvalues):
+        #     # XXX This can happen in Active0 or Active1 (it's IE5). Should
+        #     # pass in another handler function like _received_last_reply
+        #     # that other states can use to act here. Active2 and 3 should
+        #     # log/ignore it, Active0 and 1 should call IE5 (and also do
+        #     # something?).
+        return list((NO_OP, None))
+
     def handle_link_down(self, linkmsg):
         # The relevant link has already failed in Active3 or Passive in order
         # to get to Active2, so it can't fail again.
@@ -454,6 +482,14 @@ class StateActive3(BaseActive):
         # Send reply to old successor
         # IE13. Transition to passive
         pass
+
+    def _handle_query_from_successor(neighbor, nexthop, metric, t_entry, get_kvalues):
+        #     # XXX This can happen in Active0 or Active1 (it's IE5). Should
+        #     # pass in another handler function like _received_last_reply
+        #     # that other states can use to act here. Active2 and 3 should
+        #     # log/ignore it, Active0 and 1 should call IE5 (and also do
+        #     # something?).
+        return list((NO_OP, None))
 
     def handle_link_down(self, linkmsg):
         # For all neighbors attached to this interface:
