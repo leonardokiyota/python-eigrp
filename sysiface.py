@@ -310,6 +310,14 @@ class PhysicalInterface(object):
     def get_mtu(self):
         return 1500
  
+    def is_up(self):
+        """Is the interface "up?""""
+        return True
+
+    def is_down(self):
+        """Is the interface "down?""""
+        return ! self.is_up()
+
  
 class LogicalInterface(object):
     def __init__(self, phy_iface, ip, metric=1):

@@ -71,6 +71,7 @@ class TopologyEntry(object):
         self.successor = self.NO_SUCCESSOR
         self._feasible_successors = list()
         self._get_kvalues = get_kvalues
+        self.feasible_distance = None
 
     def add_neighbor(self, neighbor_info):
         """Add a neighbor to the topology entry.
@@ -84,16 +85,16 @@ class TopologyEntry(object):
         RTPNeighbor instance."""
         return self.neighbors[neighbor]
 
-#    def update_neighbor(self, neighbor, reported_distance):
-#        """Add a new neighbor for this prefix, or update an existing
-#        neighbor's reported distance.
-#        Take the appropriate action in the fsm.
-#        Returns the fsm's return value."""
-#        if not neighbor in self._neighbors:
-#            self._neighbors[neighbor] = ToplogyNeighborInfo(neighbor,
-#                                                           reported_distance)
-#        # XXX Check if reported distance decreased etc, call into fsm as
-#        # necessary.
+    def update_neighbor(self, neighbor, reported_distance):
+        """Update neighbor's reported distance and add/remove to/from
+        list of feasible successors if necessary."""
+        if not self.feasible_distance:
+            return
+        if reported_distance <= self.feasible_distance:
+            self.feasible_successors.append(neighbor)
+        elif reported_distance > self.feasible_distance:
+            if neighbor in self.feasible_successors:
+                self.feasible_successors.remove(neighbor)
 
     def all_replies_received(self):
         """Checks if replies from all fully-formed neighbors have been
@@ -123,25 +124,32 @@ class TopologyEntry(object):
                 return False
         return True
 
-    def get_all_feasible_successors(self):
+    def compute_feasible_successors(self):
         """Compute a list of all possible feasible successors based on the
         current successor."""
-        feasible_successors = list()
+        self.feasible_successors = list()
         if self.successor == self.SELF_SUCCESSOR:
+            # XXX ?
             return
-        feasible_distance = self.successor.full_distance.compute_metric(*self._get_kvalues())
+        self.feasible_distance = self.successor.full_distance.compute_metric(*self._get_kvalues())
         for n_entry in self.neighbors:
             if n_entry.metric.compute_metric(*self._get_kvalues()) < \
                feasible_distance:
                 feasible_successors.append(n_entry)
-        return feasible_successors
 
     def get_feasible_successor(self):
         """Return the best feasible successor for this route if any exist,
         otherwise return None."""
-        if not entries:
+        # XXX Need a better function name; this is used when no FSes currently
+        # exist. See draft 4, page 15 for possible nomenclature.
+        # "recalculate_successor()"? calculate_new_successor()?
+        # XXX Or - this could be used to hide the complexity of only
+        # performing recalculations when no FSes exist. This function
+        # can figure out if there is an FS, if so return that. If not,
+        # choose a new successor by performing a full recalculation.
+        if not self.neighbors:
             return None
-        return min(entries, key=self._get_min_metric)
+        min(self.neighbors, key=self._get_min_metric)
 
     def _get_min_metric(self, n_entry):
         return n_entry.full_distance.compute_metric()

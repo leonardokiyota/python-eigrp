@@ -156,6 +156,7 @@ class StatePassive(DualState):
                                                             tlv.metric,
                                                             get_kvalues))
             neighbor_entry = t_entry.get_neighbor(neighbor)
+        t_entry.update_neighbor(neighbor_entry, tlv.metric)
         successor_entry = t_entry.successor
 
         if successor_entry == neighbor_entry:
@@ -177,7 +178,7 @@ class StatePassive(DualState):
                     fs = t_entry.get_feasible_successor()
                     if fs:
                         # Install FS and send update with new metric.
-                        return list(INSTALL_SUCCESSOR, fs.neighbor)
+                        return list((INSTALL_SUCCESSOR, fs.neighbor))
                     else:
                         # No known route to dest. IE4, go to Active.
                         t_entry.fsm.fsm.IE4()
@@ -213,7 +214,8 @@ class StatePassive(DualState):
                     actions.append((SEND_UPDATE, tlv))
                     return actions
         else:
-            # Update came from non-successor.
+            # Update came from non-successor. Update its information in the
+            # topology entry.
             # If there is no successor currently and the prefix is reachable
             # via this neighbor, use this neighbor as the successor.
             if successor_entry == t_entry.NO_SUCCESSOR:
@@ -288,6 +290,11 @@ class StatePassive(DualState):
         #                # because we're waiting
         #                # for responses. Where do we want to do this?
         #                # Stop using route for routing.
+        #                # XXX What if we have no other neighbors? Currently
+        #                # we'll never determine that we can stop waiting
+        #                # for replies, since none will ever come, and
+        #                # that determination only happens when we recv a
+        #                # reply.
         #            Endif
         #        Endif
         pass
@@ -299,7 +306,7 @@ class StatePassive(DualState):
 
 class BaseActive(DualState):
 
-    def _received_last_reply(self):
+    def _handle_query_from_successor(self, neighbor, nexthop, metric, t_entry, get_kvalues):
         """Must override in subclass.
         This function is called when we have received
         all replies and thus should transition back to passive. This function
@@ -343,7 +350,7 @@ class BaseActive(DualState):
         t_entry.fsm.fsm.IE8()
         neighbor.waiting_for_reply.remove(t_entry.prefix)
         if t_entry.all_replies_received():
-            self._received_last_reply()
+            return self._received_last_reply(neighbor, nexthop, t_entry)
         return list((self.NO_OP, None))
 
     def handle_query(self, neighbor, nexthop, metric, t_entry, get_kvalues):
@@ -374,12 +381,20 @@ class StateActive0(BaseActive):
 
     # XXX Handle IE 5 and 6 in BaseActive. See BaseActive.handle_query
 
-    def _received_last_reply(self):
-        # If link to old successor still exists:
-        #     Send reply to old successor.
-        # Endif
+    def _received_last_reply(self, neighbor, nexthop, t_entry):
+        # "need not send a REPLY to the old successor"
         # IE14. Transition to passive.
-        pass
+        t_entry.fsm.fsm.IE14()
+        actions = list()
+        fs = t_entry.get_feasible_successor()
+        if fs:
+            actions.append((INSTALL_SUCCESSOR, fs.neighbor))
+        else:
+            # XXX No feasible successor... clearly I shouldn't have
+            # transitioned to passive.
+        #if t_entry.successor.iface.logical_interface.phy_iface.is_up():
+        #    actions.append((SEND_REPLY, t_entry.successor))
+        return actions
 
     def _handle_query_from_successor(neighbor, nexthop, metric, t_entry, get_kvalues):
         #     # XXX This can happen in Active0 or Active1 (it's IE5). Should
@@ -423,14 +438,15 @@ class StateActive1(BaseActive):
 
     # We can have IEs: 5,6,7,8,9,15
 
-    def _received_last_reply(self):
+    def _received_last_reply(self, neighbor, nexthop, t_entry):
         # If link to old successor still exists:
         #     Send reply to old successor.
         # Endif
         # IE15. Transition to passive.
         pass
 
-    def _handle_query_from_successor(neighbor, nexthop, metric, t_entry, get_kvalues):
+    def _handle_query_from_successor(neighbor, nexthop, metric, t_entry,
+                                     get_kvalues):
         #     # XXX This can happen in Active0 or Active1 (it's IE5). Should
         #     # pass in another handler function like _received_last_reply
         #     # that other states can use to act here. Active2 and 3 should
@@ -450,7 +466,7 @@ class StateActive2(BaseActive):
 
     # We can have IEs: 6,7,8,12,16
 
-    def _received_last_reply(self):
+    def _received_last_reply(self, neighbor, nexthop, t_entry):
         # If there is a feasible successor:
         #     IE16. Transition to passive.
         # Else:
@@ -478,12 +494,31 @@ class StateActive3(BaseActive):
 
     # We can have IEs: 6,7,8,10,13
 
-    def _received_last_reply(self):
+    def _received_last_reply(self, neighbor, nexthop, t_entry):
         # Send reply to old successor
         # IE13. Transition to passive
-        pass
+        # XXX RFC's description of IE13/14/15 doesn't include text saying to
+        # install a new route... but since we're transitioning to passive
+        # I think we need to do that.
 
-    def _handle_query_from_successor(neighbor, nexthop, metric, t_entry, get_kvalues):
+        # XXX Some of this is probably wrong.
+        t_entry.fsm.fsm.IE13()
+        fs = t_entry.get_feasible_successor()
+        actions = list()
+        if fs:
+            # Install FS and send update with new metric.
+            actions.append((INSTALL_SUCCESSOR, fs.neighbor))
+        else:
+            # XXX No feasible successors, what do I do?
+            pass
+        # XXX t_entry.successor should be the old successor until the new
+        # successor is installed in the caller, so I should be able to use this
+        # to send a reply to the old successor.
+        actions.append((SEND_REPLY, t_entry.successor))
+        return actions
+
+    def _handle_query_from_successor(neighbor, nexthop, metric, t_entry,
+                                     get_kvalues):
         #     # XXX This can happen in Active0 or Active1 (it's IE5). Should
         #     # pass in another handler function like _received_last_reply
         #     # that other states can use to act here. Active2 and 3 should
