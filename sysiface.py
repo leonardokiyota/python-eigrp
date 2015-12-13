@@ -311,12 +311,12 @@ class PhysicalInterface(object):
         return 1500
  
     def is_up(self):
-        """Is the interface "up?""""
+        """Is the interface "up?"""
         return True
 
     def is_down(self):
-        """Is the interface "down?""""
-        return ! self.is_up()
+        """Is the interface "down?"""
+        return not self.is_up()
 
  
 class LogicalInterface(object):

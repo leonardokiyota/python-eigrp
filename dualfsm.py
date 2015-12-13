@@ -3,7 +3,10 @@
 """The DUAL finite state machine."""
 
 # Get fysom using "pip install fysom"
-from fysom import Fysom
+try:
+    from fysom import Fysom
+except ImportError:
+    print("fysom module is not installed. Install with 'pip install fysom'")
 
 # Actions that the FSM can request of EIGRP.
 # The current idea is that the FSM returns a list of dicts containing actions
@@ -392,6 +395,7 @@ class StateActive0(BaseActive):
         else:
             # XXX No feasible successor... clearly I shouldn't have
             # transitioned to passive.
+            pass
         #if t_entry.successor.iface.logical_interface.phy_iface.is_up():
         #    actions.append((SEND_REPLY, t_entry.successor))
         return actions

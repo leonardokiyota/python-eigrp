@@ -29,12 +29,14 @@
 # OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
 # WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
+import binascii
 import struct
 import socket
 import sys
 from twisted.internet import fdesc, udp, reactor
 from twisted.python import log
 from twisted.internet.main import installReactor
+import twisted
 
 from twisted.python.runtime import platformType
 if platformType == 'win32':
@@ -157,18 +159,18 @@ class IPTransport(udp.MulticastPort):
                     # If not, there are other validation checks that can be
                     # performed here.
                     if len(data) < 1:
-                        log.msg("Received invalid packet with data length less than 1 from host %s." % addr[0])
+                        log.err("Received invalid packet with data length less than 1 from host %s." % addr[0])
                         continue
                     iphdrlen = (ord(data[0]) & 0x0f) << 2
                     if iphdrlen < 20:
-                        log.msg("Received malformed packet. IP header len too small: %d bytes" % iphdrlen)
+                        log.err("Received malformed packet. IP header len too small: %d bytes" % iphdrlen)
                         continue
                     if len(data) <= iphdrlen:
-                        log.msg("Received malformed or empty packet from host %s." % addr[0])
+                        log.err("Received malformed or empty packet from host %s." % addr[0])
                         continue
-                    totallen = struct.unpack("H", data[3:5])[0]
+                    totallen = struct.unpack(">H", data[2:4])[0]
                     if len(data) != totallen:
-                        log.msg("Received malformed or partial packet from host %s, total length field didn't match received data length." % addr[0])
+                        log.err("Received malformed or partial packet from host %s, total length field didn't match received data length." % addr[0])
                         continue
                     self.protocol.datagramReceived(data[iphdrlen:], addr)
                 except:

@@ -321,7 +321,7 @@ class RTPChat(rtp.ReliableTransportProtocol):
             if tlv.type == TLVText.TYPE:
                 self.log.debug5("Receiving Text TLV.")
                 self._process_chat_msg(neighbor, tlv.text)
-            if tlv.type == TLVAutoReply.TYPE:
+            elif tlv.type == TLVAutoReply.TYPE:
                 self._process_autoreply(neighbor, tlv.text)
             elif tlv.type == TLVUserResponse.TYPE:
                 self.log.debug5("Receiving User Response TLV.")
@@ -395,6 +395,8 @@ class RTPChat(rtp.ReliableTransportProtocol):
             self._process_reply_tlvs(neighbor, hdr, tlvs)
         elif hdr.opcode == self._rtphdr.OPC_REQUEST:
             self._process_request_tlvs(neighbor, hdr, tlvs)
+        elif hdr.opcode == self._rtphdr.OPC_HELLO:
+            self.log.debug("Received hello in RTPChat, no processesing needed.")
         else:
             self.log.debug("Received unknown opcode: {}".format(hdr.opcode))
 
@@ -417,7 +419,7 @@ def main(args):
         print("Usage: ./rtpchat.py ip user logconfig")
         return 1
 
-    system = sysiface.SystemFactory(0, 0).build()
+    system = sysiface.SystemFactory().build()
     rtpchat = RTPChat(user, RTPChat.GTK_UI, ip, system=system,
                       logconfig=logconfig)
     

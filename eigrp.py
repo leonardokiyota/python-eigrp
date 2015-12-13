@@ -585,6 +585,9 @@ class EIGRP(rtp.ReliableTransportProtocol):
         self.log.info("EIGRP is shutting down.")
         self._cleanup()
 
+    def initReceived(self, neighbor):
+        pass
+
     def foundNeighbor(self, neighbor):
         pass
 

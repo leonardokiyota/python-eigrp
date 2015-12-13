@@ -250,7 +250,7 @@ class ValueClassicDest(ValueBase):
             self._setformat(plen)
 
     def _setformat(self, plen):
-        self.FORMAT = "B%ds" % self._getaddrpacklen(plen)
+        self.FORMAT = ">B%ds" % self._getaddrpacklen(plen)
         self.LEN = struct.calcsize(self.FORMAT)
 
     def unpack(self, raw):

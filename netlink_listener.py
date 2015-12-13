@@ -112,7 +112,7 @@ class RtAttrIFLAOperState(RtAttrBase):
     def __init__(self, data, *args, **kwargs):
         RtAttrBase.__init__(self, *args, **kwargs)
         self.fields['state'] = struct.unpack("B", data)[0]
-        if not self._OPER_MIN < self.fields['state'] < self._OPER_MAX:
+        if not self._OPER_MIN <= self.fields['state'] <= self._OPER_MAX:
             raise ValueError("Operational state out of range: "
                              "{}".format(self.fields['state']))
 
