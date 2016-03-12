@@ -36,6 +36,7 @@ import rtptlv
 import util
 import sysiface
 from tw_baseiptransport import reactor
+import eigrpadmin
 
 class TopologyEntry(object):
     """A topology entry contains the FSM object used for a given prefix,
@@ -235,7 +236,11 @@ class EIGRP(rtp.ReliableTransportProtocol):
             self_iface_event_listener = netlink_listener.LinuxIfaceEventListener(self._link_up, self._link_down)
         else:
             self.log.info("Currently no iface event listener for Windows.")
-        #eigrpadmin.run(self, port=admin_port)
+        if admin_port:
+            self.log.info("Admin interface starting on port {}".format(admin_port))
+            eigrpadmin.start(self, port=admin_port)
+        else:
+            self.log.info("Admin port not set, disabling admin interface")
 
     def _link_up(self, ifname):
         # XXX TODO
@@ -649,6 +654,9 @@ def parse_args(argv):
     if not options.interface:
         op.error("At least one interface IP is required (-i).")
 
+    if not (0 < options.admin_port < 65535):
+        op.error("Admin port (-P) must be between 0 and 65535. If 0, admin interface is disabled.")
+
     # Turn kvalues into a list
     options.kvalues = options.kvalues.split(",")
     if len(options.kvalues) != 5:
@@ -695,6 +703,7 @@ def main(argv):
                       logconfig=options.log_config,
                       rid=options.router_id,
                       asn=options.as_number,
+                      admin_port=options.admin_port,
                      )
     eigrpserv.run()
 
