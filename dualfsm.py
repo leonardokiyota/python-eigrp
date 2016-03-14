@@ -21,6 +21,10 @@ MODIFY_SUCCESSOR_ROUTE = 4
 SEND_QUERY             = 5
 SEND_REPLY             = 6
 
+# Not in love with having to ask for a message to be logged, but I like
+# it better than using a log object for now.
+LOG_MSG                = 7
+
 class DualFsm(object):
 
     # Input events. See section 3.5, Dual FSM, in the RFC.
@@ -52,7 +56,7 @@ class DualFsm(object):
                   ]
 
     def __init__(self, get_kvalues):
-        """get_kvalues -- a function to retrieve the current K-values"""
+        """get_kvalues - a function to retrieve the current K-values"""
         callbacks = { 'onPassive': self._enter_passive,
                       'onActive0': self._enter_active0,
                       'onActive1': self._enter_active1,
@@ -191,11 +195,16 @@ class StatePassive(DualState):
                         actions.append((SEND_QUERY, tlv))
 
                         # Stop using route for routing.
+                        # XXX Believe we should keep the successor listed as
+                        # t_entry.successor until we get a new successor
+                        # or we find that no good successors exist. We
+                        # need a reference to the "previous successor"
+                        # in handle_link_down, at least.
                         actions.append((UNINSTALL_SUCCESSOR, None))
 
                         # Set reply flag for all neighbors for this prefix
-                        for n_entry in t_entry.neighbors:
-                            n_entry.waiting_for_reply.append(tlv.dest.addr.exploded)
+                        for n_info in t_entry.neighbors:
+                            n_info.waiting_for_reply = True
                 else:
                     # Successor is still reachable but metric changed.
                     # Update the metric for this neighbor in topology entry
@@ -266,8 +275,8 @@ class StatePassive(DualState):
                 actions.append((UNINSTALL_SUCCESSOR, None))
 
                 # Set reply flag for all neighbors for this prefix
-                for n_entry in t_entry.neighbors:
-                    n_entry.waiting_for_reply.append(tlv.dest.addr.exploded)
+                for n_info in t_entry.neighbors:
+                    n_info.waiting_for_reply = True
         else:
             # Query did not come from successor, reply with our route info
             # XXX What should the actions list look like for this?
@@ -351,7 +360,8 @@ class BaseActive(DualState):
         # Presumably we check if the tlv's metric is reachable or not and
         # either add a new successor here or don't.
         t_entry.fsm.fsm.IE8()
-        neighbor.waiting_for_reply.remove(t_entry.prefix)
+        n_info = t_entry.get_neighbor(neighbor)
+        n_info.waiting_for_reply = False
         if t_entry.all_replies_received():
             return self._received_last_reply(neighbor, nexthop, t_entry)
         return list((self.NO_OP, None))
@@ -365,7 +375,9 @@ class BaseActive(DualState):
         #     # something?).
         # Else:
         #     # Sender is not the successor
-        #     IE6. Send a REPLY. # Record the cost that I send... where and why?
+        #     IE6. Send a REPLY.
+        #          Rev5 seems to clarify that the receiver of the query
+        #          records the cost, not the sender.
         # Endif
         if neighbor == t_entry.successor:
             # XXX What args do I need?
@@ -388,25 +400,17 @@ class StateActive0(BaseActive):
         # "need not send a REPLY to the old successor"
         # IE14. Transition to passive.
         t_entry.fsm.fsm.IE14()
-        actions = list()
         fs = t_entry.get_feasible_successor()
         if fs:
-            actions.append((INSTALL_SUCCESSOR, fs.neighbor))
+            return list((INSTALL_SUCCESSOR, fs.neighbor))
         else:
-            # XXX No feasible successor... clearly I shouldn't have
-            # transitioned to passive.
-            pass
-        #if t_entry.successor.iface.logical_interface.phy_iface.is_up():
-        #    actions.append((SEND_REPLY, t_entry.successor))
-        return actions
+            # XXX Still no feasible successor, what else should I do here?
+            return list((NO_OP, None))
 
     def _handle_query_from_successor(neighbor, nexthop, metric, t_entry, get_kvalues):
-        #     # XXX This can happen in Active0 or Active1 (it's IE5). Should
-        #     # pass in another handler function like _received_last_reply
-        #     # that other states can use to act here. Active2 and 3 should
-        #     # log/ignore it, Active0 and 1 should call IE5 (and also do
-        #     # something?).
-        pass
+        # IE5. There is no special handling mentioned in Rev5 other than
+        # to set the query origin flag to 3 (i.e. transition to Active3).
+        t_entry.fsm.fsm.IE5()
 
     def handle_link_down(self, linkmsg):
         # The relevant link has already failed in Active3 or Passive in order
@@ -434,7 +438,7 @@ class StateActive0(BaseActive):
         #       IE11.
         #       Route stays in active. Transition to Active1.
         #       Send QUERY to all neighbors.
-        #       Set QUERY origin flag to 1.
+        #       (Set QUERY origin flag to 1.)
         pass
 
 
@@ -443,27 +447,68 @@ class StateActive1(BaseActive):
     # We can have IEs: 5,6,7,8,9,15
 
     def _received_last_reply(self, neighbor, nexthop, t_entry):
-        # If link to old successor still exists:
-        #     Send reply to old successor.
-        # Endif
-        # IE15. Transition to passive.
-        pass
+        # IE15.
+        # All replies received.
+        #
+        # Either the router originated the query, or the FC was not satisfied
+        # with the replies received in ACTIVE state.
+        # Use minimum of all reported metrics as the new FD.
+        # IE15 - Transition to passive. (I take it we're installing the
+        # neighbor with the best metric as the new successor?)
+        # If there was a QUERY from the old successor:
+        #     Send reply to old successor (See note below)
+        #
+        # I don't believe there is a case where we can be in this function
+        # and have received a query from the old successor. The point of
+        # Active1, as I understand it, is that we haven't received a query
+        # from the successor. So I don't think the last 'if' statement
+        # logic is necessary, we shouldn't have to ever send a reply.
+        # May be wrong.
+        fs = t_entry.get_feasible_successor()
+        if fs:
+            return list((INSTALL_SUCCESSOR, fs.neighbor))
+        else:
+            # No FS... anything else I need to do here?
+            return list((NO_OP, None))
 
     def _handle_query_from_successor(neighbor, nexthop, metric, t_entry,
                                      get_kvalues):
-        #     # XXX This can happen in Active0 or Active1 (it's IE5). Should
-        #     # pass in another handler function like _received_last_reply
-        #     # that other states can use to act here. Active2 and 3 should
-        #     # log/ignore it, Active0 and 1 should call IE5 (and also do
-        #     # something?).
-        pass
+        # IE5. There is no special handling mentioned in Rev5 other than
+        # to set the query origin flag to 3 (i.e. transition to Active3).
+        t_entry.fsm.fsm.IE5()
 
-    def handle_link_down(self, linkmsg):
+    def handle_link_down(self, rtpiface, t_entry):
+        # XXX Need to look at this again, just trying to work out roughly what
+        # this function should look like.
+        #
         # The relevant link has already failed in Active3 or Passive in order
         # to get to Active2, so it can't fail again.
         # (What about if link is flapping, i.e. goes down and then back up and
         # down again?)
-        pass
+        # If the failed link was between the router and its successor:
+        #       Treat it as if a REPLY was received from successor
+        #       # XXX I think this means we need to call handle_reply so we're not waiting for successor any more
+        #       If local router already sent a QUERY:
+        #           IE9. Transition to Active2 ("set QUERY origin flag...")
+        if t_entry.successor == t_entry.SELF_SUCCESSOR:
+            return list((NO_OP, None))
+
+        if t_entry.successor.iface == rtpiface:
+            # Note: This will cause IE8 to trigger, which is fine except
+            # it might be confusing to see.
+            # If this is the last reply we needed, then _received_last_reply
+            # would normally transition to passive.
+            # 
+            self.handle_reply(successor, None, t_entry)
+
+            # "When this occurs after the router originates a query..."
+            # This should always be true for us; we queried as soon as
+            # we were aware of successor's route loss. Only case where
+            # this wouldn't make sense is if we only had to query our
+            # successor. Since the link just failed, we might not
+            # really need to bother going to IE9 here - but maybe we do.
+            # 
+            t_entry.fsm.fsm.IE9()
 
 
 class StateActive2(BaseActive):
@@ -473,18 +518,22 @@ class StateActive2(BaseActive):
     def _received_last_reply(self, neighbor, nexthop, t_entry):
         # If there is a feasible successor:
         #     IE16. Transition to passive.
+        #     (Presumably install FS as successor and use it for routing)
         # Else:
         #     IE12. Transition to Active3.
+        #     Send QUERY to all neighbors
         # Endif
-        pass
+        fs = t_entry.get_feasible_successor()
+        if fs:
+            t_entry.fsm.fsm.IE16()
+            return list((INSTALL_SUCCESSOR, fs))
+        else:
+            t_entry.fsm.fsm.IE12()
+            return list((SEND_QUERY, t_entry))
 
     def _handle_query_from_successor(neighbor, nexthop, metric, t_entry, get_kvalues):
-        #     # XXX This can happen in Active0 or Active1 (it's IE5). Should
-        #     # pass in another handler function like _received_last_reply
-        #     # that other states can use to act here. Active2 and 3 should
-        #     # log/ignore it, Active0 and 1 should call IE5 (and also do
-        #     # something?).
-        return list((NO_OP, None))
+        # Shouldn't happen in Active2 or Active3. Could log or just ignore.
+        return list((LOG_MSG, "Received unexpected query from successor in Active2"))
 
     def handle_link_down(self, linkmsg):
         # The relevant link has already failed in Active3 or Passive in order
@@ -503,7 +552,7 @@ class StateActive3(BaseActive):
         # IE13. Transition to passive
         # XXX RFC's description of IE13/14/15 doesn't include text saying to
         # install a new route... but since we're transitioning to passive
-        # I think we need to do that.
+        # I think we need to do that, if we have a valid route.
 
         # XXX Some of this is probably wrong.
         t_entry.fsm.fsm.IE13()
@@ -523,36 +572,22 @@ class StateActive3(BaseActive):
 
     def _handle_query_from_successor(neighbor, nexthop, metric, t_entry,
                                      get_kvalues):
-        #     # XXX This can happen in Active0 or Active1 (it's IE5). Should
-        #     # pass in another handler function like _received_last_reply
-        #     # that other states can use to act here. Active2 and 3 should
-        #     # log/ignore it, Active0 and 1 should call IE5 (and also do
-        #     # something?).
-        return list((NO_OP, None))
+        # Shouldn't happen in Active2 or Active3. Could log or just ignore.
+        return list((LOG_MSG, "Received unexpected query from successor in Active2"))
 
     def handle_link_down(self, linkmsg):
         # For all neighbors attached to this interface:
+        #     IE8. Clear neighbor REPLY flag.
         #     If neighbor is successor:
-        #         IE10. Clear QUERY origin flag
-        #         IE10. Set TRANSITION flag. (See below.)
-        #     Else:
-        #         # Neighbor not successor:
-        #         IE8. Clear neighbor REPLY flag.
+        #         IE10. Transition to Active2 (set QUERY origin flag)
         #     Endif
         # Endfor
         #
         # XXX IE10 and IE13 can happen simultaneously, i.e. a link goes down
         # and that means we've received all replies from all neighbors.
         # Do we go to Active2 or Passive state?
-        #
-        # If TRANSITION flag was set above:
-        #     IE10. Transition to Active2 state
-        # Endif
-        #
-        # If all neighbors have replied:
-        #    IE13. Send a REPLY to the old successor
-        #    IE13. Transition to Passive state
-        # Endif
+        # We should end up in Passive, but we might hit Active2 first
+        # depending on the function logic.
         pass
 
 

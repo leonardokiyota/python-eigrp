@@ -54,17 +54,17 @@ class ReliableTransportProtocol(protocol.DatagramProtocol):
 
     def __init__(self, system, logconfig, multicast_ip="224.0.0.10", port=0,
                  kvalues=None, rid=0, asn=0, hello_interval=5, hdrver=2):
-        """system -- The system interface to use
-        logconfig -- The logging config file to use
-        multicast_ip -- The multicast IP to use
-        port -- The port to use, if applicable
-        kvalues -- A list of values that must match before establishing a
-                   neighbor relationship (when used with EIGRP these are
-                   metric weights)
-        rid -- The router ID
-        asn -- The autonomous system number
-        hello_interval -- Hello interval. Also influences neighbor timeout
-        hdrver -- The version of the RTP header to use
+        """system - The system interface to use
+        logconfig - The logging config file to use
+        multicast_ip - The multicast IP to use
+        port - The port to use, if applicable
+        kvalues - A list of values that must match before establishing a
+                  neighbor relationship (when used with EIGRP these are
+                  metric weights)
+        rid - The router ID
+        asn - The autonomous system number
+        hello_interval - Hello interval. Also influences neighbor timeout
+        hdrver - The version of the RTP header to use
         """
         # XXX Should probably figure out Twisted's log observers and use that.
 
@@ -271,8 +271,8 @@ class ReliableTransportProtocol(protocol.DatagramProtocol):
 
     def __send_rtp_unicast(self, neighbor, pkt):
         """Send an RTP packet as a unicast.
-        neighbor -- The neighbor to send to
-        pkt -- The RTP packet to send
+        neighbor - The neighbor to send to
+        pkt - The RTP packet to send
         """
         # Note: This doesn't handle sequencing. To send sequenced packets to
         # a neighbor, call RTPNeighbor._pushrtp. That handles the transmission
@@ -285,10 +285,10 @@ class ReliableTransportProtocol(protocol.DatagramProtocol):
 
     def __send_rtp_multicast(self, iface, opcode, tlvs, ack, flags=0):
         """Send an RTP packet as a multicast.
-        iface -- The interface object to send from
-        opcode -- The opcode number to use in the RTP header
-        tlvs -- An iterable of TLVs to send
-        ack -- If the packet requires an acknowledgment
+        iface - The interface object to send from
+        opcode - The opcode number to use in the RTP header
+        tlvs - An iterable of TLVs to send
+        ack - If the packet requires an acknowledgment
         """
         pkt = self.__make_pkt(opcode, tlvs, ack, flags)
         self.log.debug5("Sending multicast out iface {}: {}".format(iface, \
@@ -317,10 +317,10 @@ class ReliableTransportProtocol(protocol.DatagramProtocol):
         """Send a sequence TLV listing the given IP addresses, and a next
         multicast sequence TLV listing.
 
-        iface -- The interface to send from
-        seq_ips -- An iterable of packed addresses to be included in the
-                   seq TLV listing
-        next_seq -- The next multicast sequence number
+        iface - The interface to send from
+        seq_ips - An iterable of packed addresses to be included in the
+                  seq TLV listing
+        next_seq - The next multicast sequence number
         """
         # Note: In Cisco IOS 12.4 (EIGRP ver 1.2), this is sent along with
         # a parameters TLV (as in a periodic hello). It "should" be ok
@@ -332,9 +332,9 @@ class ReliableTransportProtocol(protocol.DatagramProtocol):
 
     def __make_pkt(self, opcode, tlvs, ack, flags=0):
         """Generate an RTP packet.
-        opcode -- The RTP opcode number
-        tlvs -- An iterable of TLVs
-        ack -- If an ack is required for this packet
+        opcode - The RTP opcode number
+        tlvs - An iterable of TLVs
+        ack - If an ack is required for this packet
         """
         if ack:
             seq = self.__get_seq()
@@ -606,15 +606,15 @@ class RTPNeighbor(object):
     def __init__(self, ip, iface, rtphdr, log, dropfunc,
                  make_pkt, sendfunc, kvalues):
         """
-        ip -- IP address of this neighbor
-        iface -- Logical interface this neighbor was heard on
-        seq -- Current sequence number we have received from this neighbor
-        rtphdr -- The RTP header class to use
-        log -- A log function
-        dropfunc -- The function to call if this neighbor should be dropped
-        make_pkt -- A function that will generate an RTP packet
-        sendfunc -- A function to call every time a packet is (re)transmitted
-        kvalues -- The k-values needed in order to form an adjacency
+        ip - IP address of this neighbor
+        iface - Logical interface this neighbor was heard on
+        seq - Current sequence number we have received from this neighbor
+        rtphdr - The RTP header class to use
+        log - A log function
+        dropfunc - The function to call if this neighbor should be dropped
+        make_pkt - A function that will generate an RTP packet
+        sendfunc - A function to call every time a packet is (re)transmitted
+        kvalues - The k-values needed in order to form an adjacency
         """
         self.iface = iface
         self.ip = ipaddr.IPv4Address(ip)
@@ -882,7 +882,7 @@ class RTPNeighbor(object):
         # we don't send a unicast immediately. This is because we've already
         # sent the packet as a multicast in the caller.
         # XXX For this reason, perhaps pushrtp can be refactored so that it
-        # does not need to call write() either -- then we could just call
+        # does not need to call write() either - then we could just call
         # pushrtp here. The caller would always call write.
         if not self._peekrtp():
             self._seq_to = pkt.hdr.seq
@@ -892,9 +892,9 @@ class RTPNeighbor(object):
 
     def send(self, opcode, tlvs, ack, flags=0):
         """Wrapper for ReliableTransportProtocol.__send_rtp_unicast.
-        opcode -- The RTP opcode number to use
-        tlvs -- An iterable of TLVs to send
-        ack -- If the packet requires an ack or not
+        opcode - The RTP opcode number to use
+        tlvs - An iterable of TLVs to send
+        ack - If the packet requires an ack or not
 
         Note that if you are using RTP for sequencing and acknowledgements,
         ack needs to be set to True. If ack is set to False, RTP does not
@@ -942,10 +942,10 @@ class RTPNeighbor(object):
 
     def _retransmit(self, init_time, first_call=True):
         """Retransmit the current RTP packet.
-        init_time -- The time this was first called
-        first_call -- If this is the first time this function was called for
-                      the current packet. (Should always be True when called
-                      by anything other than this function.)
+        init_time - The time this was first called
+        first_call - If this is the first time this function was called for
+                     the current packet. (Should always be True when called
+                     by anything other than this function.)
         """
         if not first_call:
             self.log.debug("Retransmitting: {}".format(self._peekrtp()))
@@ -983,9 +983,9 @@ class RTPInterface(object):
 
     def __init__(self, logical_iface, writefunc, rtphdr):
         """
-        logical_iface -- The logical interface to use
-        writefunc -- The function to use when sending packets from this
-                     interface
+        logical_iface - The logical interface to use
+        writefunc - The function to use when sending packets from this
+                    interface
         """
         self._neighbors = dict()
         self.logical_iface = logical_iface
@@ -1017,10 +1017,10 @@ class RTPInterface(object):
 
     def send(self, opcode, tlvs, ack, flags=0):
         """Send an RTP multicast from this interface.
-        opcode -- The opcode number to use in the RTP header
-        tlvs -- An iterable of TLVs to send
-        ack -- The packet requires an acknowledgment. If True, retransmissions
-               will be queued for all neighbors on this interface.
+        opcode - The opcode number to use in the RTP header
+        tlvs - An iterable of TLVs to send
+        ack - The packet requires an acknowledgment. If True, retransmissions
+              will be queued for all neighbors on this interface.
         """
         # Check if self.activated?
         # Stats (multicast packets sent)?
