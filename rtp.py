@@ -249,18 +249,18 @@ class ReliableTransportProtocol(protocol.DatagramProtocol):
             self.log.debug("Preventing adjacency with non-link-local "
                            "neighbor.")
             return None
-        neighbor = RTPNeighbor(addr,
-                               iface,
-                               self._rtphdr,
-                               self.log,
-                               self.__rtp_lost_neighbor,
-                               self.__make_pkt,
-                               self.__send_rtp_unicast,
-                               [self._k1,
-                                self._k2,
-                                self._k3,
-                                self._k4,
-                                self._k5])
+        neighbor = RTPNeighbor(ip=addr,
+                               iface=iface,
+                               rtphdr=self._rtphdr,
+                               log=self.log,
+                               dropfunc=self.__rtp_lost_neighbor,
+                               make_pkt=self.__make_pkt,
+                               sendfunc=self.__send_rtp_unicast,
+                               kvalues=[self._k1,
+                                        self._k2,
+                                        self._k3,
+                                        self._k4,
+                                        self._k5])
         iface.add_neighbor(neighbor)
         return neighbor
 

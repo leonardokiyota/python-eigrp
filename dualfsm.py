@@ -8,6 +8,8 @@ try:
 except ImportError:
     print("fysom module is not installed. Install with 'pip install fysom'")
 
+from topology import TopologyNeighborInfo
+
 # Actions that the FSM can request of EIGRP.
 # The current idea is that the FSM returns a list of dicts containing actions
 # that eigrp should perform based on the fsm's processing.
@@ -159,9 +161,9 @@ class StatePassive(DualState):
         try:
             neighbor_entry = t_entry.get_neighbor(neighbor)
         except KeyError:
-            t_entry.add_neighbor(eigrp.TopologyNeighborInfo(neighbor,
-                                                            tlv.metric,
-                                                            get_kvalues))
+            t_entry.add_neighbor(TopologyNeighborInfo(neighbor,
+                                                      tlv.metric,
+                                                      get_kvalues))
             neighbor_entry = t_entry.get_neighbor(neighbor)
         t_entry.update_neighbor(neighbor_entry, tlv.metric)
         successor_entry = t_entry.successor

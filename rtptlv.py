@@ -139,16 +139,6 @@ class ValueClassicMetric(ValueBase):
         self._computed_metric = None
         super(ValueBase, self).__thisclass__.__init__(self, *args, **kwargs)
 
-    def __setattr__(self, attr, val):
-        """Force a recalc of metric if an attribute was modified.
-        Note that __setattr__ is already overridden by ValueBase for packing,
-        so we still to call that as well.
-        """
-        super(ValueBase, self).__thisclass__.__setattr__(self, attr, val)
-        super(object, self).__thisclass__.__setattr__(self,
-                                                      "_computed_metric",
-                                                      None)
-
     def _get_private_fields(self):
         return self._PRIVFIELDS
 
@@ -199,9 +189,6 @@ class ValueClassicMetric(ValueBase):
     def compute_metric(self, k1, k2, k3, k4, k5):
         """Return a metric integer based on the input k values."""
         # See RFC section 5.5.1.1, Classic Composite Formulation.
-        if self._computed_metric != None:
-            return self._computed_metric
-
         metric = k1 * self.bw * self.METRIC_SCALE + \
                  k2 * self.bw / (256 - self.load) + \
                  k3 * self.dly * self.METRIC_SCALE
@@ -223,13 +210,20 @@ class ValueClassicMetric(ValueBase):
         if not unreliability_multiplier:
             unreliability_multiplier = 1
 
-        self._computed_metric = metric * unreliability_multiplier
-        return self._computed_metric
+        return metric * unreliability_multiplier
 
-    def clear_saved_metric(self):
-        """Clear the precomputed metric. Should be called if EIGRP's
-        kvalues change to force a metric recalculation."""
-        self._computed_metric = None
+    def update_for_iface(self, iface):
+        """Update the TLV metrics so that it is correct if the TLV is
+        advertised out of the provided iface."""
+        iface_bw = iface.phy_iface.get_bandwidth()
+        if iface_bw < self.bw:
+            self.bw = iface_bw
+        self.dly  += iface.phy_iface.get_delay()
+        self.load += iface.phy_iface.get_load()
+        self.rel  += iface.phy_iface.get_reliability()
+        self.hops += 1
+        if iface.phy_iface.get_mtu() < self.mtu:
+            self.mtu = iface.phy_iface.get_mtu()
 
     def reachable(self):
         """Determines if the route is reachable.
@@ -506,21 +500,6 @@ class TLVPeerTIDList(TLVBase):
 class TLVInternal4(TLVBase):
     TYPE   = TLVBase.PROTO_IP4 | 2
     VALUES = [ ValueNexthop, ValueClassicMetric, ValueClassicDest ]
-
-    def update_for_iface(self, iface):
-        """Update the TLV metrics so that it is correct if the TLV is
-        advertised out of the provided iface."""
-        self.nexthop.ip = iface.logical_iface.ip
-        iface_bw = iface.phy_iface.get_bandwidth()
-        if iface_bw < self.metric.bw:
-            self.metric.bw = iface_bw
-        self.metric.dly  += iface.phy_iface.get_delay()
-        self.metric.load += iface.phy_iface.get_load()
-        self.metric.rel  += iface.phy_iface.get_reliability()
-        self.metric.hops += 1
-        if iface.phy_iface.get_mtu() < tlv.metric.mtu:
-            tlv.metric.mtu = iface.phy_iface.get_mtu
-        self.nexthop.ip = ipaddr.IPv4Address("0.0.0.0")
 
 
 class TLVFactory(object):
