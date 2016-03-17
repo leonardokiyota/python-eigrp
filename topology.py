@@ -147,26 +147,13 @@ class TopologyNeighborInfo(object):
         # Note that the interface on which a neighbor was observed is stored
         # within the RTPNeighbor instance.
         self.neighbor          = neighbor
-        self.full_distance     = copy.deepcopy(reported_distance)
-        self.reported_distance = reported_distance
         self._get_kvalues      = get_kvalues
+        self.reported_distance = reported_distance
 
         # waiting_for_reply should be init'd to False in normal cases.
         # XXX Need to verify the behavior when a neighbor comes up while a
         # query is out.
         self.waiting_for_reply = False
-
-        # neighbor is None when it refers to the local router, in which
-        # case the full distance is the interface cost and the reported
-        # distance is 0.
-        # For anything else, the full distance is the reported
-        # distance plus the interface cost.
-        if self.neighbor:
-            self._update_full_distance()
-
-    def _update_full_distance(self):
-        self.full_distance.update_for_iface(self.neighbor.iface)
-        self.full_distance.compute_metric(*self.get_kvalues())
 
     @property
     def reported_distance(self):
@@ -175,4 +162,5 @@ class TopologyNeighborInfo(object):
     @reported_distance.setter
     def reported_distance(self, val):
         self._reported_distance = val
-        self._update_full_distance()
+        self.full_distance = copy.deepcopy(self._reported_distance)
+        self.full_distance.update_for_iface(self.neighbor.iface)

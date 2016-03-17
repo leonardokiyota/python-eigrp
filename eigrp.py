@@ -126,20 +126,18 @@ class EIGRP(rtp.ReliableTransportProtocol):
         if not import_routes:
             return
 
-        # Currently trying to use None as the neighbor for local routes.
-        # TopologyEntry doesn't use any RTPNeighbor functions for successor
-        # determination etc. - so this may be sufficient.
-        #
-        # Using an RTPNeighbor for consistency won't work because it will drop
-        # itself (see RTPNeighbor._drop_event).
-        #
-        # If we ever do need to use something other than None, perhaps a new
-        # class can be used that just implements those functions needed by the
-        # local host - e.g. class EIGRPLocalNode or similar.
-        local_neighbor = None
         for rtpiface in self._ifaces:
             if not rtpiface.activated:
                 continue
+
+            # A new class is used to represent the local EIGRP node in the
+            # topology table, which just holds the minimum data needed for the
+            # topology table - namely, the interface to reach the local
+            # network being added. This is needed for metric calculations.
+            #
+            # Using an RTPNeighbor for consistency won't work because it will
+            # drop itself (see RTPNeighbor._drop_event).
+            local_neighbor = EigrpLocalNode(iface=rtpiface)
 
             prefix = rtpiface.logical_iface.ip.masked().with_prefixlen
             self.log.info("Adding route for {}".format(prefix))
@@ -460,13 +458,13 @@ class EIGRP(rtp.ReliableTransportProtocol):
         self._cleanup()
 
     def initReceived(self, neighbor):
-        pass
+        self.log.info("Init received from {}".format(neighbor.ip.exploded))
 
     def foundNeighbor(self, neighbor):
-        pass
+        self.log.info("Found neighbor {}".format(neighbor.ip.exploded))
 
     def lostNeighbor(self, neighbor):
-        pass
+        self.log.info("Lost neighbor {}".format(neighbor.ip.exploded))
 
     def rtpReceived(self, neighbor, hdr, tlvs):
         try:
@@ -511,7 +509,7 @@ def parse_args(argv):
     op.add_option("-l", "--log-config", default="logging.conf",
                   help="The logging configuration file "
                        "(default logging.conf).")
-    op.add_option("-k", "--kvalues", type="str", default="1,74,1,0,0",
+    op.add_option("-k", "--kvalues", type="str", default="1,1,1,0,0",
                   help="Use non-default K-values (metric coefficients).")
     op.add_option("-t", "--hello-interval", type="int", default=5,
                   help="Use non-default hello timer. Hold time is 3 times the"
@@ -573,6 +571,16 @@ def main(argv):
                       admin_port=options.admin_port,
                      )
     eigrpserv.run()
+
+
+class EigrpLocalNode(object):
+    """Used to represent the local EIGRP node in routes added to the
+    topology table."""
+
+    def __init__(self, iface):
+        self.iface = iface
+        self.ip = ipaddr.IPv4Address("127.0.0.1")
+
 
 if __name__ == "__main__":
     main(sys.argv)

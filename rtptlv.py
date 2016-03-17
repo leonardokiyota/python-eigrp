@@ -215,15 +215,15 @@ class ValueClassicMetric(ValueBase):
     def update_for_iface(self, iface):
         """Update the TLV metrics so that it is correct if the TLV is
         advertised out of the provided iface."""
-        iface_bw = iface.phy_iface.get_bandwidth()
+        iface_bw = iface.logical_iface.phy_iface.get_bandwidth()
         if iface_bw < self.bw:
             self.bw = iface_bw
-        self.dly  += iface.phy_iface.get_delay()
-        self.load += iface.phy_iface.get_load()
-        self.rel  += iface.phy_iface.get_reliability()
+        self.dly  += iface.logical_iface.phy_iface.get_delay()
+        self.load += iface.logical_iface.phy_iface.get_load()
+        self.rel  += iface.logical_iface.phy_iface.get_reliability()
         self.hops += 1
-        if iface.phy_iface.get_mtu() < self.mtu:
-            self.mtu = iface.phy_iface.get_mtu()
+        if iface.logical_iface.phy_iface.get_mtu() < self.mtu:
+            self.mtu = iface.logical_iface.phy_iface.get_mtu()
 
     def reachable(self):
         """Determines if the route is reachable.

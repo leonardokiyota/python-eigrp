@@ -146,20 +146,20 @@ class RootCmd(EigrpCmd):
         log.removeHandler(self.my_handlers[subsystem])
         del self.my_handlers[subsystem]
 
-#    def do_python(self, line):
-#        """Executes any arguments as Python code from within the EIGRPAdminCLI
-#        object and prints the result to the vty.
-#
-#        Since the EIGRP process runs as root, telnet is made available
-#        remotely without authentication, and this can execute system commands
-#        (e.g. rm...), this is an eminently bad idea unless you're on a
-#        machine in a trusted environment.  That's why this is commented
-#        out by default. However, it can be extremely useful as an ad hoc
-#        debugging tool."""
-#        try:
-#            self.stdout.write(pprint.pformat(eval(line)) + "\n")
-#        except:
-#            self.stdout.write(traceback.format_exc() + "\n")
+    def do_python(self, line):
+        """Executes any arguments as Python code from within the EIGRPAdminCLI
+        object and prints the result to the vty.
+
+        Since the EIGRP process runs as root, telnet is made available
+        remotely without authentication, and this can execute system commands
+        (e.g. rm...), this is an eminently bad idea unless you're on a
+        machine in a trusted environment.  That's why this is commented
+        out by default. However, it can be extremely useful as an ad hoc
+        debugging tool."""
+        try:
+            self.stdout.write(pprint.pformat(eval(line)) + "\n")
+        except:
+            self.stdout.write(traceback.format_exc() + "\n")
 
     def usage(self):
         self.stdout.write("Error parsing command. Usage:\n")
