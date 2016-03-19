@@ -125,14 +125,16 @@ class EIGRP(rtp.ReliableTransportProtocol):
     def _get_kvalues(self):
         return self._k1, self._k2, self._k3, self._k4, self._k5
 
+    def _get_active_ifaces(self):
+        for iface in self._ifaces:
+            if iface.activated:
+                yield iface
+
     def _init_routes(self, import_routes):
         if not import_routes:
             return
 
-        for rtpiface in self._ifaces:
-            if not rtpiface.activated:
-                continue
-
+        for rtpiface in self._get_active_ifaces():
             # A new class is used to represent the local EIGRP node in the
             # topology table, which just holds the minimum data needed for the
             # topology table - namely, the interface to reach the local
@@ -144,7 +146,7 @@ class EIGRP(rtp.ReliableTransportProtocol):
 
             prefix = rtpiface.logical_iface.ip
             self.log.info("Adding route for {}".format(prefix))
-            metric = rtptlv.ValueClassicMetric(0, 0, 0, 0, 0, 0, 0, 0)
+            metric = rtptlv.ValueClassicMetric(0, 0, 0, 0, 255, 0, 0, 0)
             if prefix in self._topology.values():
                 self.log.info("Prefix was already in topology table. "
                               "Skipping.")
@@ -195,14 +197,16 @@ class EIGRP(rtp.ReliableTransportProtocol):
                 return
 
         # Send UPDATE and/or QUERY if necessary.
+        self.log.debug("Update TLVs to send: {}".format(update_tlvs))
+        self.log.debug("Query TLVs to send: {}".format(update_tlvs))
         if update_tlvs:
-            self._send(dests=self._get_active_ifaces(),
-                       opcode=rtp.OPC_UPDATE,
+            self._send(dsts=self._get_active_ifaces(),
+                       opcode=self._rtphdr.OPC_UPDATE,
                        tlvs=update_tlvs,
                        ack=True)
         if query_tlvs:
-            self._send(dests=self._get_active_ifaces(),
-                       opcode=rtp.OPC_QUERY,
+            self._send(dsts=self._get_active_ifaces(),
+                       opcode=self._rtphdr.OPC_QUERY,
                        tlvs=query_tlvs,
                        ack=True)
 
@@ -217,8 +221,8 @@ class EIGRP(rtp.ReliableTransportProtocol):
         update_tlvs - a list that this function will append TLVs to, to be
                       included in an UPDATE packet"""
         # XXX hdr unused.
-        prefix = ipaddr.IPv4Network("{}/{}".format(tlv.dest.exploded,
-                                                   tlv.plen))
+        prefix = ipaddr.IPv4Network("{}/{}".format(tlv.dest.addr.exploded,
+                                                   tlv.dest.plen))
 
         # All zeroes means use the source address of the incoming packet.
         if tlv.nexthop.ip.exploded == "0.0.0.0":
@@ -245,7 +249,8 @@ class EIGRP(rtp.ReliableTransportProtocol):
         actions = t_entry.fsm.handle_update(neighbor,
                                             nexthop,
                                             tlv.metric,
-                                            t_entry)
+                                            t_entry,
+                                            self._get_kvalues)
         for action, data in actions:
             if action == dualfsm.NO_OP:
                 continue
@@ -306,8 +311,8 @@ class EIGRP(rtp.ReliableTransportProtocol):
 
         # Send QUERY if necessary.
         if query_tlvs:
-            self._send(dests=self._get_active_ifaces(),
-                       opcode=rtp.OPC_QUERY,
+            self._send(dsts=self._get_active_ifaces(),
+                       opcode=self._rtphdr.OPC_QUERY,
                        tlvs=query_tlvs,
                        ack=True)
 
@@ -452,10 +457,9 @@ class EIGRP(rtp.ReliableTransportProtocol):
         self._sys.cleanup()
 
     def startProtocol(self):
-        for iface in self._ifaces:
-            if iface.activated:
-                self.transport.joinGroup(self._multicast_ip,
-                                         iface.logical_iface.ip.ip.exploded)
+        for iface in self._get_active_ifaces():
+            self.transport.joinGroup(self._multicast_ip,
+                                     iface.logical_iface.ip.ip.exploded)
 
     def stopProtocol(self):
         self.log.info("EIGRP is shutting down.")

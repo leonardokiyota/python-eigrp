@@ -218,9 +218,16 @@ class ValueClassicMetric(ValueBase):
         iface_bw = iface.logical_iface.phy_iface.get_bandwidth()
         if iface_bw < self.bw:
             self.bw = iface_bw
+
+        # XXX Need to lookup if these are additive or the lowest/highest along
+        # the path.
         self.dly  += iface.logical_iface.phy_iface.get_delay()
         self.load += iface.logical_iface.phy_iface.get_load()
-        self.rel  += iface.logical_iface.phy_iface.get_reliability()
+        unreliability = 255 - iface.logical_iface.phy_iface.get_reliability()
+        self.rel -= unreliability
+        if self.rel < 0:
+            self.rel = 0
+
         self.hops += 1
         if iface.logical_iface.phy_iface.get_mtu() < self.mtu:
             self.mtu = iface.logical_iface.phy_iface.get_mtu()
@@ -239,18 +246,30 @@ class ValueClassicDest(ValueBase):
 
     def __init__(self, *args, **kwargs):
         super(ValueBase, self).__thisclass__.__init__(self, *args, **kwargs)
-        if args:
-            self.addr = ipaddr.IPv4Address(self.addr)
-            self._setformat(self.plen)
+
+    def _parse_args(self, args):
+        self.plen = args[0]
+        self.addr = ipaddr.IPv4Address(args[1])
+        self._setformat(self.plen)
 
     def _setformat(self, plen):
         self.FORMAT = ">B%ds" % self._getaddrpacklen(plen)
         self.LEN = struct.calcsize(self.FORMAT)
 
     def unpack(self, raw):
-        plen, addr = super(ValueBase, self).__thisclass__.unpack(self, raw)
+        plen = struct.unpack("B", raw[0])[0]
         self._setformat(plen)
-        return plen, ipaddr.IPv4Address(ipaddr.Bytes(addr.ljust(4, "\x00")))
+        addrlen = self._getaddrpacklen(plen)
+        padded_addr = raw[1:1+addrlen] + "\x00" * (4 - addrlen)
+        raw_addr = struct.unpack(">I", padded_addr)[0]
+        addr = ipaddr.IPv4Address(raw_addr)
+
+        return plen, addr
+
+        #return struct.unpack(self.FORMAT, raw[:self.getlen()])
+        #plen, addr = super(ValueBase, self).__thisclass__.unpack(self, raw)
+        #self._setformat(plen)
+        #return plen, ipaddr.IPv4Address(ipaddr.Bytes(addr.ljust(4, "\x00")))
 
     def pack(self):
         if not self._packed:
@@ -423,7 +442,7 @@ class TLVBase(object):
         index = 0
         objs = list()
         for valclass in self.VALUES:
-            obj = valclass(raw=raw)
+            obj = valclass(raw=raw[index:])
             objs.append(obj)
             index += obj.getlen()
         return objs

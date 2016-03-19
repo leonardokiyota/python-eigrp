@@ -45,10 +45,10 @@ class _System(object):
 
     def modify_route(self, net, plen, metric, nexthop):
         """Update the metric and nexthop address to a prefix.
-        net -- the IP network address (not including netmask)
-        plen -- the prefix length
-        metric -- the metric to use, as an integer
-        nexthop -- the nexthop IP address
+        net - the IP network address (not including netmask)
+        plen - the prefix length
+        metric - the metric to use, as an integer
+        nexthop - the nexthop IP address
         """
         self.uninstall_route(net, plen)
         self.install_route(net, plen, metric, nexthop)
@@ -70,13 +70,13 @@ class _System(object):
         Override in subclass."""
         assert False
 
-    def uninstall_route(self, net, mask):
+    def uninstall_route(self, net, plen):
         """Uninstall a route from the system routing table.
 
         Override in subclass."""
         assert False
 
-    def install_route(self, net, preflen, metric, nexthop):
+    def install_route(self, net, plen, metric, nexthop):
         """Install a route in the system routing table.
 
         Override in subclass."""
@@ -137,16 +137,16 @@ class WindowsSystem(_System):
             self.logical_ifaces.append(LogicalInterface(self.phy_ifaces[0],
                                                         net))
 
-    def uninstall_route(self, net, preflen):
+    def uninstall_route(self, net, plen):
         # Convert the prefix length into a dotted decimal mask
-        mask = self.preflen_to_snmask(preflen)
+        mask = self.plen_to_snmask(plen)
         cmd = self.ROUTE_DEL.format(net, mask)
         output = subprocess.check_output(cmd, stderr=subprocess.STDOUT)
         if not "OK!" in output:
             raise ValueError #ModifyRouteError("uninstall", output)
 
-    def install_route(self, net, preflen, metric, nexthop):
-        mask = self.preflen_to_snmask(preflen)
+    def install_route(self, net, plen, metric, nexthop):
+        mask = self.plen_to_snmask(plen)
         cmd = self.ROUTE_ADD.format(net,
                                     mask,
                                     nexthop,
@@ -156,8 +156,8 @@ class WindowsSystem(_System):
             raise ValueError #ModifyRouteError("uninstall", output)
 
     @staticmethod
-    def preflen_to_snmask(preflen):
-        return ipaddr.IPv4Network("0.0.0.0/%d" % preflen).netmask
+    def plen_to_snmask(plen):
+        return ipaddr.IPv4Network("0.0.0.0/%d" % plen).netmask
 
     def get_local_routes(self):
         output = subprocess.check_output("route print",
@@ -187,9 +187,9 @@ class LinuxSystem(_System):
 
     def __init__(self, table=52, priority=1000, *args, **kwargs):
         """Args:
-        table -- the routing table to install routes to (if applicable on
+        table - the routing table to install routes to (if applicable on
             the current platform).
-        priority -- the desirability of routes learned by the process
+        priority - the desirability of routes learned by the process
             relative to other routing daemons (if applicable on the current
             platform)"""
         super(_System, self).__thisclass__.__init__(self, *args, **kwargs)
@@ -247,15 +247,15 @@ class LinuxSystem(_System):
                 logical_iface = LogicalInterface(phy_iface, addr)
                 self.logical_ifaces.append(logical_iface)
 
-    def uninstall_route(self, net, preflen):
-        cmd = [self.IP_CMD] + ("route del {}/{} table {}".format(net, preflen, self._table).split())
+    def uninstall_route(self, net, plen):
+        cmd = [self.IP_CMD] + ("route del {}/{} table {}".format(net, plen, self._table).split())
         try:
             output = subprocess.check_output(cmd, stderr=subprocess.STDOUT)
         except subprocess.CalledProcessError:
             raise ValueError #ModifyRouteError("route_uninstall", output)
 
-    def install_route(self, net, preflen, metric, nexthop):
-        cmd = [self.IP_CMD] + ("route add {}/{} via {} metric {} table {}".format(net, preflen, nexthop, metric, self._table).split())
+    def install_route(self, net, plen, metric, nexthop):
+        cmd = [self.IP_CMD] + ("route add {}/{} via {} metric {} table {}".format(net, plen, nexthop, metric, self._table).split())
         try:
             output = subprocess.check_output(cmd, stderr=subprocess.STDOUT)
         except subprocess.CalledProcessError:

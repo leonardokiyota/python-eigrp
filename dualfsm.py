@@ -10,6 +10,10 @@ except ImportError:
 
 from topology import TopologyNeighborInfo
 
+import logging
+
+log = logging.getLogger("DUAL")
+
 # Actions that the FSM can request of EIGRP.
 # The current idea is that the FSM returns a list of dicts containing actions
 # that eigrp should perform based on the fsm's processing.
@@ -22,10 +26,6 @@ UNINSTALL_SUCCESSOR    = 3
 MODIFY_SUCCESSOR_ROUTE = 4
 SEND_QUERY             = 5
 SEND_REPLY             = 6
-
-# Not in love with having to ask for a message to be logged, but I like
-# it better than using a log object for now.
-LOG_MSG                = 7
 
 class DualFsm(object):
 
@@ -78,18 +78,23 @@ class DualFsm(object):
         self._get_kvalues = get_kvalues
 
     def _enter_passive(self, e):
+        log.debug("Entering state Passive")
         self._state = self._states['passive']
 
     def _enter_active0(self, e):
+        log.debug("Entering state Active0")
         self._state = self._states['active0']
 
     def _enter_active1(self, e):
+        log.debug("Entering state Active1")
         self._state = self._states['active1']
 
     def _enter_active2(self, e):
+        log.debug("Entering state Active2")
         self._state = self._states['active2']
 
     def _enter_active3(self, e):
+        log.debug("Entering state Active3")
         self._state = self._states['active3']
 
     def handle_update(self, neighbor, nexthop, metric, t_entry, get_kvalues):
@@ -161,20 +166,24 @@ class StatePassive(DualState):
         try:
             neighbor_entry = t_entry.get_neighbor(neighbor)
         except KeyError:
+            log.debug("Creating new neighbor for fsm...")
             t_entry.add_neighbor(TopologyNeighborInfo(neighbor,
-                                                      tlv.metric,
+                                                      metric,
                                                       get_kvalues))
             neighbor_entry = t_entry.get_neighbor(neighbor)
-        t_entry.update_neighbor(neighbor_entry, tlv.metric)
+        t_entry.update_neighbor(neighbor_entry, metric)
         successor_entry = t_entry.successor
 
+        log.debug("Current successor: {}".format(successor_entry))
+
         if successor_entry == neighbor_entry:
+            log.debug("Update came from successor")
             # QRY came from current successor
             kvalues = get_kvalues()
             if successor_entry.reported_distance.compute_metric(*kvalues) == \
                                 metric.compute_metric(*kvalues):
                 # If metric hasn't changed, do nothing
-                return list((NO_OP, None))
+                return [(NO_OP, None)]
             else:
                 # Came from successor and metric is different
                 if not metric.reachable():
@@ -187,14 +196,14 @@ class StatePassive(DualState):
                     fs = t_entry.get_feasible_successor()
                     if fs:
                         # Install FS and send update with new metric.
-                        return list((INSTALL_SUCCESSOR, fs.neighbor))
+                        return [(INSTALL_SUCCESSOR, fs.neighbor)]
                     else:
                         # No known route to dest. IE4, go to Active.
                         t_entry.fsm.fsm.IE4()
 
                         # Send QRY to all neighbors for this prefix.
                         actions = list()
-                        actions.append((SEND_QUERY, tlv))
+                        actions.append((SEND_QUERY, None))
 
                         # Stop using route for routing.
                         # XXX Believe we should keep the successor listed as
@@ -221,27 +230,29 @@ class StatePassive(DualState):
                     # Not sure if that is useful for now, depends if anything
                     # else in the fsm installs a successor without sending
                     # an update... which doesn't sound likely.
-                    successor_entry.reported_distance = tlv.metric
+                    successor_entry.reported_distance = metric
                     successor_entry.update_full_distance()
                     actions = list()
-                    actions.append((SET_METRIC, tlv))
-                    actions.append((SEND_UPDATE, tlv))
+                    actions.append((SET_METRIC, None))
+                    actions.append((SEND_UPDATE, None))
                     return actions
         else:
+            log.debug("Update came from non-successor")
             # Update came from non-successor. Update its information in the
             # topology entry.
             # If there is no successor currently and the prefix is reachable
             # via this neighbor, use this neighbor as the successor.
             if successor_entry == t_entry.NO_SUCCESSOR:
                 if not metric.reachable():
-                    return list((NO_OP, None))
-                return list((INSTALL_SUCCESSOR, neighbor))
-        return list((NO_OP, None))
+                    return [(NO_OP, None)]
+                    log.debug("Received reachable metric for prefix lacking a successor - use this neighbor as successor")
+                return [(INSTALL_SUCCESSOR, neighbor)]
+        return [(NO_OP, None)]
 
     def handle_reply(self, neighbor, nexthop, t_entry):
         # We shouldn't normally receive a REPLY in Passive state, and there
         # is no reason we would need to parse it here. Just ignore it.
-        return list((NO_OP, None))
+        return [(NO_OP, None)]
 
     def handle_query(self, neighbor, nexthop, metric, t_entry, get_kvalues):
         # IE1 and IE3
@@ -267,7 +278,7 @@ class StatePassive(DualState):
                 # Just pass up the FS I think - we already know the tlv
                 # in the caller, so we can fill out the reply correctly I
                 # think.
-                return list((SEND_REPLY, fs))
+                return [(SEND_REPLY, fs)]
             else:
                 t_entry.fsm.fsm.IE3()
                 actions = list()
@@ -286,7 +297,7 @@ class StatePassive(DualState):
             # in the caller, so we can fill out the reply correctly I
             # think.
             t_entry.fsm.fsm.IE1()
-            return list((SEND_REPLY, successor))
+            return [(SEND_REPLY, successor)]
 
     def handle_link_down(self, linkmsg):
         # IE2 and IE4 for link down changes. Snipped from handle_update,
@@ -342,7 +353,7 @@ class BaseActive(DualState):
         if t_entry.get_neighbor(neighbor).reported_distance != metric:
             t_entry.fsm.fsm.IE7()
             t_entry.get_neighbor(neighbor).reported_distance = metric
-        return list((NO_OP, None))
+        return [(NO_OP, None)]
 
     def handle_reply(self, neighbor, nexthop, t_entry):
         # IE8 for REPLYs. Clear REPLY flag for this neighbor.
@@ -366,7 +377,7 @@ class BaseActive(DualState):
         n_info.waiting_for_reply = False
         if t_entry.all_replies_received():
             return self._received_last_reply(neighbor, nexthop, t_entry)
-        return list((self.NO_OP, None))
+        return [(self.NO_OP, None)]
 
     def handle_query(self, neighbor, nexthop, metric, t_entry, get_kvalues):
         # If sender is the successor:
@@ -386,7 +397,7 @@ class BaseActive(DualState):
             return self._handle_query_from_successor(neighbor, nexthop, metric, t_entry, get_kvalues)
         else:
             t_entry.fsm.fsm.IE6()
-            return list((SEND_REPLY, successor))
+            return [(SEND_REPLY, successor)]
 
     def handle_link_metric_change(self, linkmsg):
         pass
@@ -404,10 +415,10 @@ class StateActive0(BaseActive):
         t_entry.fsm.fsm.IE14()
         fs = t_entry.get_feasible_successor()
         if fs:
-            return list((INSTALL_SUCCESSOR, fs.neighbor))
+            return [(INSTALL_SUCCESSOR, fs.neighbor)]
         else:
             # XXX Still no feasible successor, what else should I do here?
-            return list((NO_OP, None))
+            return [(NO_OP, None)]
 
     def _handle_query_from_successor(neighbor, nexthop, metric, t_entry, get_kvalues):
         # IE5. There is no special handling mentioned in Rev5 other than
@@ -468,10 +479,10 @@ class StateActive1(BaseActive):
         # May be wrong.
         fs = t_entry.get_feasible_successor()
         if fs:
-            return list((INSTALL_SUCCESSOR, fs.neighbor))
+            return [(INSTALL_SUCCESSOR, fs.neighbor)]
         else:
             # No FS... anything else I need to do here?
-            return list((NO_OP, None))
+            return [(NO_OP, None)]
 
     def _handle_query_from_successor(neighbor, nexthop, metric, t_entry,
                                      get_kvalues):
@@ -493,7 +504,7 @@ class StateActive1(BaseActive):
         #       If local router already sent a QUERY:
         #           IE9. Transition to Active2 ("set QUERY origin flag...")
         if t_entry.successor == t_entry.SELF_SUCCESSOR:
-            return list((NO_OP, None))
+            return [(NO_OP, None)]
 
         if t_entry.successor.iface == rtpiface:
             # Note: This will cause IE8 to trigger, which is fine except
@@ -528,14 +539,14 @@ class StateActive2(BaseActive):
         fs = t_entry.get_feasible_successor()
         if fs:
             t_entry.fsm.fsm.IE16()
-            return list((INSTALL_SUCCESSOR, fs))
+            return [(INSTALL_SUCCESSOR, fs)]
         else:
             t_entry.fsm.fsm.IE12()
-            return list((SEND_QUERY, t_entry))
+            return [(SEND_QUERY, t_entry)]
 
     def _handle_query_from_successor(neighbor, nexthop, metric, t_entry, get_kvalues):
         # Shouldn't happen in Active2 or Active3. Could log or just ignore.
-        return list((LOG_MSG, "Received unexpected query from successor in Active2"))
+        log.debug("Received unexpected query from successor in Active2")
 
     def handle_link_down(self, linkmsg):
         # The relevant link has already failed in Active3 or Passive in order
@@ -575,7 +586,7 @@ class StateActive3(BaseActive):
     def _handle_query_from_successor(neighbor, nexthop, metric, t_entry,
                                      get_kvalues):
         # Shouldn't happen in Active2 or Active3. Could log or just ignore.
-        return list((LOG_MSG, "Received unexpected query from successor in Active2"))
+        log.debug("Received unexpected query from successor in Active3")
 
     def handle_link_down(self, linkmsg):
         # For all neighbors attached to this interface:
