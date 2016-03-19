@@ -812,7 +812,7 @@ class RTPNeighbor(object):
         curmsg = self._peekrtp()
         if not curmsg:
             # We got an ACK but we weren't waiting for an ACK.
-            # We should still let the upper layer process the packet.
+            # Should we still let the upper layer process the packet?
             self.log.debug("Received spurious ACK from neighbor {}. "
                            "Header: {}".format(self, hdr))
             return self.DROP
@@ -821,10 +821,9 @@ class RTPNeighbor(object):
                             "adjacency up".format(hdr.ack, self._peekrtp()))
             self._poprtp()
             self._retransmit_event.cancel()
-
-            # We shouldn't have anything queued up while PENDING
-            assert not self._peekrtp(), "Packet was queued in PENDING state"
             self._state_receive = self._up_receive
+            if self._peekrtp():
+                self._retransmit(time.time())
             return self.NEW_ADJACENCY
         self.log.debug5("Expected ACK for {}, but got "
                         "{}.".format(curmsg.hdr.seq, hdr.ack))

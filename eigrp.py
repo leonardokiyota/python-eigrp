@@ -74,6 +74,9 @@ class EIGRP(rtp.ReliableTransportProtocol):
             self._k5 = self.DEFAULT_KVALUES[4]
 
         self._register_op_handlers()
+        self._tlvfactory.register_tlvs([rtptlv.TLVInternal4,
+                                       ])
+
         for iface in requested_ifaces:
             self.activate_iface(iface)
         self._init_routes(import_routes)
@@ -137,9 +140,9 @@ class EIGRP(rtp.ReliableTransportProtocol):
             #
             # Using an RTPNeighbor for consistency won't work because it will
             # drop itself (see RTPNeighbor._drop_event).
-            local_neighbor = EigrpLocalNode(iface=rtpiface)
+            local_node = EigrpLocalNode(iface=rtpiface)
 
-            prefix = rtpiface.logical_iface.ip.masked().with_prefixlen
+            prefix = rtpiface.logical_iface.ip
             self.log.info("Adding route for {}".format(prefix))
             metric = rtptlv.ValueClassicMetric(0, 0, 0, 0, 0, 0, 0, 0)
             if prefix in self._topology.values():
@@ -149,10 +152,11 @@ class EIGRP(rtp.ReliableTransportProtocol):
             t_entry = TopologyEntry(prefix=prefix,
                                     get_kvalues=self._get_kvalues)
             self._topology[prefix] = t_entry
-            n_info = TopologyNeighborInfo(neighbor=local_neighbor,
+            n_info = TopologyNeighborInfo(neighbor=local_node,
                                           reported_distance=metric,
                                           get_kvalues=self._get_kvalues)
             t_entry.add_neighbor(n_info)
+            t_entry.successor = n_info
 
     def _init_logging(self, log_config):
         # debug1 is less verbose, debug5 is more verbose.
@@ -459,6 +463,33 @@ class EIGRP(rtp.ReliableTransportProtocol):
 
     def initReceived(self, neighbor):
         self.log.info("Init received from {}".format(neighbor.ip.exploded))
+        tlvs = list()
+        for t_entry in self._topology.itervalues():
+            self.log.debug("Processing t_entry for {}".format(t_entry.prefix))
+            if t_entry.successor == t_entry.NO_SUCCESSOR:
+                self.log.debug("No successor, skipping")
+                continue
+
+            # XXX These TLV classes are awful and need to be redone.
+            tlvs.append(rtptlv.TLVInternal4("0.0.0.0",
+                                       t_entry.successor.full_distance.dly,
+                                       t_entry.successor.full_distance.bw,
+                                       t_entry.successor.full_distance.mtu,
+                                       t_entry.successor.full_distance.hops,
+                                       t_entry.successor.full_distance.rel,
+                                       t_entry.successor.full_distance.load,
+                                       t_entry.successor.full_distance.tag,
+                                       t_entry.successor.full_distance.flags,
+                                       t_entry.prefix.prefixlen,
+                                       t_entry.prefix.network.exploded))
+            self.log.info("Added TLV...")
+        if not tlvs:
+            self.log.info("No TLVs to advertise")
+            return
+        neighbor.send(opcode=self._rtphdr.OPC_UPDATE,
+                      tlvs=tlvs,
+                      ack=True)
+            
 
     def foundNeighbor(self, neighbor):
         self.log.info("Found neighbor {}".format(neighbor.ip.exploded))

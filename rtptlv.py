@@ -241,7 +241,7 @@ class ValueClassicDest(ValueBase):
         super(ValueBase, self).__thisclass__.__init__(self, *args, **kwargs)
         if args:
             self.addr = ipaddr.IPv4Address(self.addr)
-            self._setformat(plen)
+            self._setformat(self.plen)
 
     def _setformat(self, plen):
         self.FORMAT = ">B%ds" % self._getaddrpacklen(plen)
@@ -354,8 +354,8 @@ class TLVBase(object):
     """Base class for EIGRP TLVs."""
 
     PROTO_GENERIC = 0
-    PROTO_IP4     = 0x100
-    PROTO_IP6     = 0x400
+    PROTO_IP4     = 0x0100
+    PROTO_IP6     = 0x0400
 
     HDR_FORMAT = ">HH"
     HDR_LEN = struct.calcsize(HDR_FORMAT)
@@ -545,8 +545,8 @@ class TLVFactory(object):
 
     def build(self, raw):
         """Returns one TLV parsed from raw data."""
+        _type = self._unpack_hdr(raw)[self._typeindex]
         try:
-            _type = self._unpack_hdr(raw)[self._typeindex]
             return self._tlvs[_type](raw=raw)
         except KeyError:
             raise ValueError("Unknown type in TLV: %d" % _type)
